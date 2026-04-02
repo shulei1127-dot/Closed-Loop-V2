@@ -1,0 +1,192 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h3>PTS 会话</h3>
+        <p>Cookie 只经过前端提交到后端，本页面不会回显已保存原文。</p>
+      </div>
+      <div class="session-status-group">
+        <span id="pts-session-badge" class="badge status-{{ 'success' if pts_session_status.configured else 'warning' }}">
+          {{ '已配置' if pts_session_status.configured else '未配置' }}
+        </span>
+        <span id="pts-session-updated" class="muted">
+          {{ '最后更新：' ~ (pts_session_status.updated_at | fmt_dt) if pts_session_status.updated_at else '尚未保存' }}
+        </span>
+      </div>
+    </div>
+    <form id="pts-cookie-form" class="stack-form">
+      <label for="pts-cookie-input">PTS Cookie</label>
+      <textarea id="pts-cookie-input" name="cookie_header" rows="4" placeholder="粘贴最新的 PTS Cookie Header" autocomplete="off" spellcheck="false"></textarea>
+      <div class="inline-actions">
+        <button type="submit" class="action-button">应用新 Cookie</button>
+        <span class="muted">仅保存到后端本地 `.env`，不在前端持久化。</span>
+      </div>
+    </form>
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-head">
+    <h3>模块总览</h3>
+    <p>查看最近同步、执行、失败与人工处理状态，并支持手动同步和重跑。</p>
+  </div>
+  <div class="module-grid">
+    {% for item in module_summaries %}
+    <article class="card module-card">
+      <div class="card-head">
+        <div>
+          <h4>{{ item.module_name }}</h4>
+          <p class="muted">{{ item.module_code }}</p>
+        </div>
+        <span class="badge status-{{ item.latest_sync_status or 'unknown' }}">{{ item.latest_sync_status_label or '未同步' }}</span>
+      </div>
+      <dl class="stats">
+        <div><dt>最近同步</dt><dd>{{ item.latest_snapshot_time | fmt_dt }}</dd></div>
+        <div><dt>最近执行</dt><dd>{{ item.latest_execute_status_label or '暂无' }}</dd></div>
+        <div><dt>记录数</dt><dd>{{ item.row_count }}</dd></div>
+        <div><dt>待执行</dt><dd>{{ item.planned_tasks }}</dd></div>
+        <div><dt>已跳过</dt><dd>{{ item.skipped_tasks }}</dd></div>
+        <div><dt>需人工处理</dt><dd>{{ item.manual_required_count }}</dd></div>
+        <div><dt>失败任务</dt><dd>{{ item.failed_task_count }}</dd></div>
+        <div><dt>可重试</dt><dd>{{ item.retryable_task_count }}</dd></div>
+        <div><dt>调度</dt><dd>{{ item.schedule_type ~ ':' ~ item.schedule_value if item.schedule_enabled else '未配置' }}</dd></div>
+        <div><dt>运行中</dt><dd>{{ '是' if item.sync_running else '否' }}</dd></div>
+      </dl>
+      {% if item.latest_execute_explanation %}
+      <p class="ops-note">{{ item.latest_execute_explanation }}</p>
+      {% endif %}
+      <div class="card-actions">
+        <button
+          class="action-button"
+          data-action="sync"
+          data-module-code="{{ item.module_code }}"
+        >
+          立即同步
+        </button>
+        <button
+          class="action-button secondary"
+          data-action="rerun-sync"
+          data-module-code="{{ item.module_code }}"
+        >
+          重跑同步
+        </button>
+        <a href="/console/snapshots?module_code={{ item.module_code }}">查看快照</a>
+        <a href="/console/tasks?module_code={{ item.module_code }}">查看任务</a>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h4>交付转售后待执行回访</h4>
+        <p>这里展示当前仍需由系统创建并闭环的回访任务。执行成功后页面会自动刷新。</p>
+      </div>
+    </div>
+    {% if pending_visit_items %}
+    <table class="data-table compact-table">
+      <thead>
+        <tr>
+          <th>客户名称</th>
+          <th>回访类型</th>
+          <th>Delivery ID</th>
+          <th>最近执行</th>
+          <th>状态说明</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in pending_visit_items %}
+        <tr>
+          <td>{{ item.customer_name or '未知客户' }}</td>
+          <td>{{ item.visit_type or item.task_type }}</td>
+          <td>{{ item.delivery_id or '缺失' }}</td>
+          <td>{{ item.latest_run_time | fmt_dt if item.latest_run_time else '未执行' }}</td>
+          <td>{{ item.business_explanation }}</td>
+          <td>
+            <a href="{{ item.detail_url }}">查看任务</a>
+            <button class="action-button danger" data-action="execute" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">一键创建并闭环</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">当前没有待执行回访任务。</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="section">
+  <div class="two-column">
+    <div class="panel">
+      <h4>失败任务</h4>
+      {% if failure_items %}
+      <ul class="run-list">
+        {% for item in failure_items %}
+        <li>
+          <strong>{{ item.module_code }}</strong>
+          <span class="badge status-{{ item.status_tone }}">{{ item.display_status }}</span>
+          <span>{{ item.customer_name or item.title }}</span>
+          <span class="muted">{{ item.business_explanation }}</span>
+          {% if item.retryable %}<span class="badge status-warning">可重试</span>{% endif %}
+          {% if item.task_plan_id %}
+          <a href="{{ item.detail_url }}">查看详情</a>
+          <button class="action-button secondary" data-action="rerun-task" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">重跑任务</button>
+          {% elif item.module_code %}
+          <button class="action-button secondary" data-action="rerun-sync" data-module-code="{{ item.module_code }}">重跑同步</button>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="muted">当前没有失败项。</p>
+      {% endif %}
+    </div>
+    <div class="panel">
+      <h4>人工处理清单</h4>
+      {% if manual_required_items %}
+      <table class="data-table compact-table">
+        <thead>
+          <tr>
+            <th>模块</th>
+            <th>客户名称</th>
+            <th>Task ID</th>
+            <th>当前状态</th>
+            <th>业务解释</th>
+            <th>最近运行时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in manual_required_items %}
+          <tr>
+            <td>{{ item.module_code }}</td>
+            <td>{{ item.customer_name or '未知客户' }}</td>
+            <td>{{ item.task_plan_id }}</td>
+            <td><span class="badge status-{{ item.status_tone }}">{{ item.display_status }}</span></td>
+            <td>{{ item.business_explanation }}</td>
+            <td>{{ item.occurred_at | fmt_dt }}</td>
+            <td>
+              {% if item.detail_url %}<a href="{{ item.detail_url }}">查看详情</a>{% endif %}
+              {% if item.task_plan_id %}
+              <button class="action-button secondary" data-action="rerun-task" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">重跑</button>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted">当前没有人工处理项。</p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}

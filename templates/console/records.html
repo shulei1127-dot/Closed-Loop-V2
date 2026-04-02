@@ -1,0 +1,53 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<section class="section">
+  <div class="section-head">
+    <h3>Records</h3>
+    <p>Phase 8 第一版低优先级页面，保留基础查看能力。</p>
+  </div>
+  <div class="two-column">
+    <div class="panel">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>模块</th>
+            <th>客户</th>
+            <th>识别状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in records %}
+          <tr class="{{ 'selected' if selected_record_id == item.id|string else '' }}">
+            <td><a href="/console/records?module_code={{ module_code or '' }}&snapshot_id={{ snapshot_id or '' }}&record_id={{ item.id }}">{{ item.module_code }}</a></td>
+            <td>{{ item.customer_name or '-' }}</td>
+            <td>{{ item.recognition_status }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="panel detail-panel">
+      {% if selected_record %}
+      <h4>Record Detail</h4>
+      <p><strong>ID:</strong> {{ selected_record.record_id }}</p>
+      <p><strong>Recognition Status:</strong> {{ selected_record.recognition_status }}</p>
+      <details open>
+        <summary>Field Mapping</summary>
+        <pre>{{ selected_record.field_mapping | to_pretty_json }}</pre>
+      </details>
+      <details>
+        <summary>Field Confidence</summary>
+        <pre>{{ selected_record.field_confidence | to_pretty_json }}</pre>
+      </details>
+      <details>
+        <summary>Unresolved Fields</summary>
+        <pre>{{ selected_record.unresolved_fields | to_pretty_json }}</pre>
+      </details>
+      {% else %}
+      <div class="empty-state">从左侧选择一条记录查看识别详情。</div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}

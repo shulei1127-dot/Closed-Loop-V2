@@ -1,0 +1,11 @@
+{
+  "data": {
+    "accessToken": "offline-visit-access-token",
+    "documentContent": {
+      "checkpoint": {
+        "content": "{\"sheetMap\":{\"Igz9TVd\":{\"recordIds\":[\"visit-row-001\",\"visit-row-002\"],\"fieldMap\":{\"rbiax8fi5eklvmdlc4v5d\":{\"name\":\"客户名称\",\"type\":\"text\",\"config\":{\"renderFieldConfig\":{\"props\":{}}}},\"ulembeeuza3ctgftx69n1\":{\"name\":\"PTS链接\",\"type\":\"link\",\"config\":{\"renderFieldConfig\":{\"props\":{}}}},\"cm3kz6c2itd5gr67x4f81\":{\"name\":\"交付单号\",\"type\":\"text\",\"config\":{\"renderFieldConfig\":{\"props\":{}}}},\"mrzf8ukhzuaek1s2q0u4v\":{\"name\":\"回访人\",\"type\":\"text\",\"config\":{\"renderFieldConfig\":{\"props\":{}}}},\"vd8h8nk8m4tr42nmroa7q\":{\"name\":\"回访状态\",\"type\":\"select\",\"config\":{\"renderFieldConfig\":{\"props\":{\"enums\":[{\"id\":\"khlT6gz2Ab\",\"value\":\"已回访\"},{\"id\":\"U6CKROpuOs\",\"value\":\"跟进中\"}]}}}},\"35voqsv7xy8pk5pknr47m\":{\"name\":\"回访链接\",\"type\":\"link\",\"config\":{\"renderFieldConfig\":{\"props\":{}}}},\"n5m1h9z62ow7i1xgak0x4\":{\"name\":\"回访类型\",\"type\":\"text\",\"config\":{\"renderFieldConfig\":{\"props\":{}}}},\"bf2v0sn0w8qux9t67e1md\":{\"name\":\"回访联系人\",\"type\":\"text\",\"config\":{\"renderFieldConfig\":{\"props\":{}}}},\"h3fs1c5b1k0w6j4t3u9md\":{\"name\":\"满意度\",\"type\":\"select\",\"config\":{\"renderFieldConfig\":{\"props\":{\"enums\":[{\"id\":\"满意\",\"value\":\"满意\"},{\"id\":\"一般\",\"value\":\"一般\"}]}}}},\"s0m4q4w9j1v6t2x8c7n5p\":{\"name\":\"反馈备注\",\"type\":\"text\",\"config\":{\"renderFieldConfig\":{\"props\":{}}}}},\"viewMap\":{\"AKOehLK\":{\"columns\":[\"rbiax8fi5eklvmdlc4v5d\",\"ulembeeuza3ctgftx69n1\",\"cm3kz6c2itd5gr67x4f81\",\"mrzf8ukhzuaek1s2q0u4v\",\"vd8h8nk8m4tr42nmroa7q\",\"35voqsv7xy8pk5pknr47m\",\"n5m1h9z62ow7i1xgak0x4\",\"bf2v0sn0w8qux9t67e1md\",\"h3fs1c5b1k0w6j4t3u9md\",\"s0m4q4w9j1v6t2x8c7n5p\"]}}}}}",
+        "baseVersion": 2314
+      }
+    }
+  }
+}

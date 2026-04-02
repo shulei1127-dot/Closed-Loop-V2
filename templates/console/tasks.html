@@ -1,0 +1,148 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<section class="section">
+  <div class="section-head">
+    <h3>任务列表</h3>
+    <form class="inline-form" method="get">
+      <input type="text" name="module_code" placeholder="module_code" value="{{ module_code or '' }}">
+      <input type="text" name="status" placeholder="plan_status" value="{{ status or '' }}">
+      <button type="submit">筛选</button>
+    </form>
+  </div>
+
+  <div class="two-column">
+    <div class="panel">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>模块</th>
+            <th>客户名称</th>
+            <th>任务类型</th>
+            <th>计划状态</th>
+            <th>最近执行</th>
+            <th>业务解释</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in task_rows %}
+          {% set task = row.task %}
+          {% set latest_run = row.latest_run %}
+          <tr class="{{ 'selected' if selected_task_id == task.id|string else '' }}">
+            <td><a href="/console/tasks?module_code={{ module_code or '' }}&status={{ status or '' }}&task_id={{ task.id }}">{{ task.module_code }}</a></td>
+            <td>{{ row.customer_name or '未知客户' }}</td>
+            <td>{{ task.task_type }}</td>
+            <td><span class="badge status-{{ task.plan_status }}">{{ '待执行' if task.plan_status == 'planned' else '已跳过' if task.plan_status == 'skipped' else task.plan_status }}</span></td>
+            <td>
+              {% if latest_run %}
+                <a href="/console/task-runs/{{ latest_run.id }}">{{ row.latest_run_view.display_status }}</a>
+                <div class="muted">{{ latest_run.run_time | fmt_dt }}</div>
+              {% else %}
+                未执行
+              {% endif %}
+            </td>
+            <td>
+              {% if row.latest_run_view %}
+                {{ row.latest_run_view.business_explanation }}
+                {% if row.latest_run_view.manual_required_label == '需人工处理' %}
+                <span class="badge status-manual">需人工处理</span>
+                {% elif row.latest_run_view.retryable_label == '可重试' %}
+                <span class="badge status-warning">可重试</span>
+                {% endif %}
+              {% else %}
+                暂无执行结果
+              {% endif %}
+            </td>
+            <td>
+              <div class="inline-actions">
+                <button class="action-button secondary" data-action="precheck" data-task-id="{{ task.id }}">预检查</button>
+                <button class="action-button" data-action="execute" data-task-id="{{ task.id }}" data-dry-run="true">演练执行</button>
+                <button class="action-button danger" data-action="execute" data-task-id="{{ task.id }}" data-dry-run="false">执行</button>
+                <button class="action-button secondary" data-action="rerun-task" data-task-id="{{ task.id }}" data-dry-run="false">重跑</button>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel detail-panel">
+      {% if selected_task %}
+      <h4>任务详情</h4>
+      <p><strong>ID:</strong> {{ selected_task.task_plan_id }}</p>
+      <p><strong>Eligibility:</strong> {{ selected_task.eligibility }}</p>
+      <p><strong>Skip Reason:</strong> {{ selected_task.skip_reason or '无' }}</p>
+      <details open>
+        <summary>Planned Payload</summary>
+        <pre>{{ selected_task.planned_payload | to_pretty_json }}</pre>
+      </details>
+      <details {% if selected_runs %}open{% endif %}>
+        <summary>执行记录</summary>
+        {% if selected_run_views %}
+        <ul class="run-list">
+          {% for item in selected_run_views %}
+          <li>
+            <a href="/console/task-runs/{{ item.run.id }}">{{ item.view.display_status }}</a>
+            <span class="muted">{{ item.run.run_time | fmt_dt }}</span>
+            <span>{{ item.view.business_explanation }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="muted">暂无执行记录。</p>
+        {% endif %}
+      </details>
+      {% else %}
+      <div class="empty-state">从左侧选择一个 task 查看详情，并使用行内按钮触发 precheck / execute。</div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <h4>最近失败任务</h4>
+    {% if failure_items %}
+    <ul class="run-list">
+      {% for item in failure_items %}
+      <li>
+        <strong>{{ item.module_code }}</strong>
+        <span class="badge status-{{ item.status_tone }}">{{ item.display_status }}</span>
+        <span>{{ item.customer_name or item.title }}</span>
+        <span>{{ item.business_explanation }}</span>
+        {% if item.detail_url %}<a href="{{ item.detail_url }}">查看详情</a>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">暂无失败任务。</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <h4>人工处理清单</h4>
+    {% if manual_required_items %}
+    <ul class="run-list">
+      {% for item in manual_required_items %}
+      <li>
+        <strong>{{ item.module_code }}</strong>
+        <span>{{ item.customer_name or '未知客户' }}</span>
+        <span class="badge status-{{ item.status_tone }}">{{ item.display_status }}</span>
+        <span>{{ item.business_explanation }}</span>
+        {% if item.detail_url %}<a href="{{ item.detail_url }}">查看详情</a>{% endif %}
+        {% if item.task_plan_id %}
+        <button class="action-button secondary" data-action="rerun-task" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">重跑</button>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">暂无人工处理项。</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

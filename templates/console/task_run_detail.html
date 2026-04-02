@@ -1,0 +1,48 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<section class="section">
+  <div class="section-head">
+    <h3>执行结果详情</h3>
+    <a href="/console/tasks?task_id={{ task_run.task_plan_id }}">返回任务</a>
+  </div>
+  <div class="panel detail-panel">
+    <p><strong>Run ID:</strong> {{ task_run.task_run_id }}</p>
+    <p><strong>Task ID:</strong> {{ task_run.task_plan_id }}</p>
+    <p><strong>客户名称:</strong> {{ task_run_view.customer_name }}</p>
+    <p><strong>当前状态:</strong> <span class="badge status-{{ task_run_view.status_tone }}">{{ task_run_view.display_status }}</span></p>
+    <p><strong>执行模式:</strong> {{ task_run_view.execution_mode or '未知' }}</p>
+    <p><strong>业务解释:</strong> {{ task_run_view.business_explanation }}</p>
+    {% if task_run_view.error_type == 'session_expired' %}
+    <div class="session-expired-callout">
+      <strong>PTS 会话已失效。</strong>
+      <span>请前往 <a href="/console">模块总览</a> 更新 Cookie 后再重跑任务。</span>
+    </div>
+    {% endif %}
+    <p><strong>错误分类:</strong> {{ task_run_view.error_type or '无' }}</p>
+    <p><strong>可重试:</strong> {{ task_run_view.retryable_label }}</p>
+    <p><strong>人工处理:</strong> {{ task_run_view.manual_required_label }}</p>
+    <p><strong>Final Link:</strong>
+      {% if task_run.final_link %}
+      <a href="{{ task_run.final_link }}" target="_blank" rel="noopener noreferrer">{{ task_run.final_link }}</a>
+      {% else %}
+      无
+      {% endif %}
+    </p>
+    <p><strong>错误信息:</strong> {{ task_run.error_message or '无' }}</p>
+    {% if task_run_view.failed_action %}
+    <p><strong>失败动作:</strong> {{ task_run_view.failed_action }}</p>
+    {% endif %}
+    {% if task_run_view.last_error %}
+    <p><strong>底层错误:</strong> {{ task_run_view.last_error }}</p>
+    {% endif %}
+    <div class="inline-actions">
+      <button class="action-button secondary" data-action="rerun-task" data-task-id="{{ task_run.task_plan_id }}" data-dry-run="false">重跑任务</button>
+    </div>
+    <details open>
+      <summary>Result Payload</summary>
+      <pre>{{ task_run.result_payload | to_pretty_json }}</pre>
+    </details>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,14 @@
+{
+  "raw_columns": [
+    "客户名称",
+    "工单链接",
+    "工单ID",
+    "巡检是否完成",
+    "报告匹配名"
+  ],
+  "raw_rows": [],
+  "raw_meta": {
+    "fixture_kind": "page_state",
+    "payload_version": "v1"
+  }
+}

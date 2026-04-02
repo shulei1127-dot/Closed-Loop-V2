@@ -1,0 +1,18 @@
+{
+  "raw_columns": [
+    "客户名称",
+    "产品链接",
+    "产品信息ID",
+    "客户建联状态",
+    "回访链接",
+    "反馈备注",
+    "联系人",
+    "联系电话",
+    "工程师"
+  ],
+  "raw_rows": [],
+  "raw_meta": {
+    "fixture_kind": "page_state",
+    "payload_version": "v1"
+  }
+}

@@ -1,0 +1,56 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<section class="section">
+  <div class="section-head">
+    <h3>Snapshots</h3>
+    <form class="inline-form" method="get">
+      <input type="text" name="module_code" placeholder="module_code" value="{{ module_code or '' }}">
+      <button type="submit">筛选</button>
+    </form>
+  </div>
+  <div class="two-column">
+    <div class="panel">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>模块</th>
+            <th>时间</th>
+            <th>状态</th>
+            <th>记录数</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in snapshots %}
+          <tr class="{{ 'selected' if selected_snapshot_id == item.id|string else '' }}">
+            <td><a href="/console/snapshots?module_code={{ module_code or '' }}&snapshot_id={{ item.id }}">{{ item.module_code }}</a></td>
+            <td>{{ item.sync_time }}</td>
+            <td>{{ item.sync_status }}</td>
+            <td>{{ item.row_count }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel detail-panel">
+      {% if selected_snapshot %}
+      <h4>Snapshot Detail</h4>
+      <p><strong>ID:</strong> {{ selected_snapshot.snapshot_id }}</p>
+      <p><strong>来源:</strong> {{ selected_snapshot.data_source }}</p>
+      <p><strong>错误:</strong> {{ selected_snapshot.sync_error or '无' }}</p>
+      <details open>
+        <summary>Raw Meta</summary>
+        <pre>{{ selected_snapshot.raw_meta | to_pretty_json }}</pre>
+      </details>
+      <details>
+        <summary>Raw Columns</summary>
+        <pre>{{ selected_snapshot.raw_columns | to_pretty_json }}</pre>
+      </details>
+      {% else %}
+      <div class="empty-state">从左侧选择一个 snapshot 查看详情。</div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% endblock %}

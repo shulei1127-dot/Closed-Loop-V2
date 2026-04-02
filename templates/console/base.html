@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page_title }} · Closed Loop V2</title>
+  <link rel="stylesheet" href="/static/console/console.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">CL</div>
+        <div>
+          <h1>Closed Loop V2</h1>
+          <p>运营工作台</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="/console" class="{{ 'active' if active_nav == 'dashboard' else '' }}">模块总览</a>
+        <a href="/console/snapshots" class="{{ 'active' if active_nav == 'snapshots' else '' }}">快照</a>
+        <a href="/console/tasks" class="{{ 'active' if active_nav == 'tasks' else '' }}">任务</a>
+        <a href="/console/records" class="{{ 'active' if active_nav == 'records' else '' }}">记录</a>
+      </nav>
+      <div class="sidebar-note">
+        <p>第一版采用 Jinja2 模板 + 原生 JavaScript。</p>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Phase 8 Console</p>
+          <h2>{{ page_title }}</h2>
+        </div>
+        <div class="topbar-actions">
+          <a href="/console" class="ghost-link">返回总览</a>
+        </div>
+      </header>
+
+      <section id="feedback-panel" class="feedback-panel hidden"></section>
+
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <script src="/static/console/app.js"></script>
+</body>
+</html>

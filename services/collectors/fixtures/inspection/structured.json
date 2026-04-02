@@ -1,0 +1,31 @@
+{
+  "raw_columns": [
+    "客户名称",
+    "工单链接",
+    "工单ID",
+    "巡检是否完成",
+    "报告匹配名"
+  ],
+  "raw_rows": [
+    {
+      "row_id": "inspection-real-001",
+      "客户名称": "南京真实客户",
+      "工单链接": "https://wo.example.com/inspection-real-001",
+      "工单ID": "WO-REAL-001",
+      "巡检是否完成": "是",
+      "报告匹配名": "南京真实客户-巡检报告"
+    },
+    {
+      "row_id": "inspection-real-002",
+      "客户名称": "苏州真实客户",
+      "工单链接": "https://wo.example.com/inspection-real-002",
+      "工单ID": "WO-REAL-002",
+      "巡检是否完成": "否",
+      "报告匹配名": "苏州真实客户-巡检报告"
+    }
+  ],
+  "raw_meta": {
+    "fixture_kind": "structured_api",
+    "payload_version": "v1"
+  }
+}
