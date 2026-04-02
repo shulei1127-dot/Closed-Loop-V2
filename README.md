@@ -1,4 +1,4 @@
-# closed_loop_v2
+# Closed-Loop-V2
 
 第一阶段代码骨架，覆盖以下链路：
 
@@ -56,4 +56,3 @@ closed_loop_v2/
 - 只使用 mock collectors
 - Playwright 仅保留 fallback 接口和 stub
 - executors 仅保留抽象定义，不做真实闭环执行
-
