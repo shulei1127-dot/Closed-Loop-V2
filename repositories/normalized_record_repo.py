@@ -45,3 +45,9 @@ class NormalizedRecordRepository(BaseRepository):
     def get_by_id(self, record_id: uuid.UUID) -> NormalizedRecord | None:
         statement = select(NormalizedRecord).where(NormalizedRecord.id == record_id)
         return self.db.scalar(statement)
+
+    def get_by_ids(self, record_ids: list[uuid.UUID]) -> dict[uuid.UUID, NormalizedRecord]:
+        if not record_ids:
+            return {}
+        statement = select(NormalizedRecord).where(NormalizedRecord.id.in_(record_ids))
+        return {record.id: record for record in self.db.scalars(statement).all()}

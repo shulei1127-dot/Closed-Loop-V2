@@ -33,7 +33,7 @@ STATUS_TONES = {
 
 ERROR_COPY = {
     "config_missing": "执行配置缺失，需要先补齐配置。",
-    "session_expired": "PTS 会话已失效，请更新 Cookie。",
+    "session_expired": "PTS 会话已失效，请重新登录 PTS 或更新 Cookie。",
     "http_error": "外部系统请求失败，可稍后重试。",
     "timeout": "请求超时，通常可稍后重试。",
     "response_invalid": "外部返回异常，需排查接口返回。",
@@ -130,5 +130,6 @@ def build_run_view(
         "last_error": diagnostics.get("last_error"),
         "task_plan_id": task_plan_id,
         "task_run_id": task_run_id,
+        "final_link": payload.get("final_link"),
         "detail_url": f"/console/task-runs/{task_run_id}" if task_run_id else None,
     }

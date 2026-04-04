@@ -65,7 +65,22 @@ def console_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLRe
             "failure_items": [item.model_dump() for item in ops_service.list_failures(limit=10)],
             "manual_required_items": [item.model_dump() for item in ops_service.list_manual_required(limit=10)],
             "pending_visit_items": [item.model_dump() for item in ops_service.list_pending_tasks(module_code="visit", limit=20)],
+            "recent_visit_links": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=10)],
             "pts_session_status": pts_session_status,
+            "active_nav": "dashboard",
+        },
+    )
+
+
+@router.get("/console/visit-links", response_class=HTMLResponse)
+def console_visit_links(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    ops_service = OpsService(db)
+    return templates.TemplateResponse(
+        name="console/visit_links.html",
+        request=request,
+        context={
+            "page_title": "闭环回访链接",
+            "visit_link_items": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=None)],
             "active_nav": "dashboard",
         },
     )
@@ -109,7 +124,14 @@ def console_tasks(
     record_repo = NormalizedRecordRepository(db)
     sync_service = SyncService(db)
     ops_service = OpsService(db)
-    tasks = task_repo.list_by_filters(module_code=module_code, status=status)
+    effective_status = status or "pending"
+    if effective_status == "pending":
+        pending_groups = ops_service._collect_pending_task_groups(module_code=module_code)
+        tasks = [group["task"] for group in pending_groups]
+        tasks.sort(key=lambda item: item.created_at, reverse=True)
+    else:
+        repo_status = None if effective_status == "all" else effective_status
+        tasks = task_repo.list_latest_by_business_key(module_code=module_code, status=repo_status)
 
     task_rows = []
     for task in tasks:
@@ -183,7 +205,7 @@ def console_tasks(
             "selected_run_views": selected_run_views,
             "selected_task_id": str(task_id) if task_id else None,
             "module_code": module_code,
-            "status": status,
+            "status": effective_status,
             "failure_items": failure_items,
             "manual_required_items": manual_required_items,
             "active_nav": "tasks",

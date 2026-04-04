@@ -10,6 +10,7 @@ from core.runtime_state import runtime_state
 from models.normalized_record import NormalizedRecord
 from models.task_plan import TaskPlan
 from repositories.normalized_record_repo import NormalizedRecordRepository
+from repositories.module_config_repo import ModuleConfigRepository
 from repositories.task_plan_repo import TaskPlanRepository
 from repositories.task_run_repo import TaskRunRepository
 from schemas.common import TaskRunDetail
@@ -32,6 +33,7 @@ class TaskExecutionService:
         self.settings = get_settings()
         self.task_plan_repo = TaskPlanRepository(db)
         self.record_repo = NormalizedRecordRepository(db)
+        self.module_config_repo = ModuleConfigRepository(db)
         self.task_run_repo = TaskRunRepository(db)
 
     def precheck_task(self, task_id: uuid.UUID) -> TaskRunDetail:
@@ -133,6 +135,10 @@ class TaskExecutionService:
         if generic_failure is not None:
             return generic_failure
 
+        duplicate_failure = self._duplicate_execution_guard(task_plan, record)
+        if duplicate_failure is not None:
+            return duplicate_failure
+
         assert record is not None
         executor = self._select_executor(task_plan)
         context = self._build_executor_context(task_plan, record)
@@ -169,23 +175,59 @@ class TaskExecutionService:
             )
         return None
 
+    def _duplicate_execution_guard(
+        self,
+        task_plan: TaskPlan,
+        record: NormalizedRecord | None,
+    ) -> ExecutionResult | None:
+        if record is None:
+            return None
+        if task_plan.module_code != "visit" or task_plan.task_type != "visit_close":
+            return None
+        if not record.source_row_id:
+            return None
+        existing_success = self.task_run_repo.latest_success_for_business_key(
+            module_code=task_plan.module_code,
+            source_row_id=record.source_row_id,
+            task_type=task_plan.task_type,
+        )
+        if existing_success is None:
+            return None
+        return ExecutionResult(
+            run_status="precheck_failed",
+            error_message="该钉钉文档行已成功创建并闭环过回访工单，禁止重复执行",
+            result_payload={
+                "source_row_id": record.source_row_id,
+                "existing_task_run_id": str(existing_success.id),
+                "existing_final_link": existing_success.final_link,
+            },
+            final_link=existing_success.final_link,
+            executor_version="phase9-visit-real-v1",
+        )
+
     def _select_executor(self, task_plan: TaskPlan):
         executor_cls = EXECUTOR_REGISTRY.get((task_plan.module_code, task_plan.task_type))
         if executor_cls is None:
             raise ValueError("executor 与 module_code / task_type 不匹配")
         return executor_cls()
 
-    @staticmethod
-    def _build_executor_context(task_plan: TaskPlan, record: NormalizedRecord) -> ExecutorContext:
+    def _build_executor_context(self, task_plan: TaskPlan, record: NormalizedRecord) -> ExecutorContext:
+        source_config = self.module_config_repo.get_source_config(task_plan.module_code)
         return ExecutorContext(
             task_plan_id=str(task_plan.id),
             module_code=task_plan.module_code,
             task_type=task_plan.task_type,
             plan_status=task_plan.plan_status,
             normalized_record_id=str(record.id),
+            source_row_id=record.source_row_id,
             recognition_status=record.recognition_status,
             planned_payload=task_plan.planned_payload,
             normalized_data=record.normalized_data,
+            source_url=source_config.source_url if source_config else None,
+            source_doc_key=source_config.source_doc_key if source_config else None,
+            source_view_key=source_config.source_view_key if source_config else None,
+            source_collector_type=source_config.collector_type if source_config else None,
+            source_extra_config=dict(source_config.extra_config) if source_config else {},
         )
 
     @staticmethod

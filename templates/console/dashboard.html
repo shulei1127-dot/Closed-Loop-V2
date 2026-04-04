@@ -88,6 +88,11 @@
         <h4>交付转售后待执行回访</h4>
         <p>这里展示当前仍需由系统创建并闭环的回访任务。执行成功后页面会自动刷新。</p>
       </div>
+      <div class="inline-actions">
+        <button class="action-button danger" data-action="execute-all-visit" data-total-count="{{ pending_visit_items | length }}" {% if not pending_visit_items %}disabled{% endif %}>
+          一键创建并闭环全部（{{ pending_visit_items | length }}）
+        </button>
+      </div>
     </div>
     {% if pending_visit_items %}
     <table class="data-table compact-table">
@@ -119,6 +124,46 @@
     </table>
     {% else %}
     <p class="muted">当前没有待执行回访任务。</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h4>最近闭环回访链接</h4>
+        <p>这里展示最新 10 条成功闭环的交付转售后回访链接；数量更多时可查看全部。</p>
+      </div>
+      <div class="inline-actions">
+        <a href="/console/visit-links">查看全部闭环回访链接</a>
+      </div>
+    </div>
+    {% if recent_visit_links %}
+    <table class="data-table compact-table">
+      <thead>
+        <tr>
+          <th>客户名称</th>
+          <th>回访类型</th>
+          <th>闭环时间</th>
+          <th>回访链接</th>
+          <th>详情</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in recent_visit_links %}
+        <tr>
+          <td>{{ item.customer_name or '未知客户' }}</td>
+          <td>{{ item.visit_type or '未知类型' }}</td>
+          <td>{{ item.occurred_at | fmt_dt }}</td>
+          <td><a href="{{ item.final_link }}" target="_blank" rel="noreferrer">{{ item.final_link }}</a></td>
+          <td>{% if item.detail_url %}<a href="{{ item.detail_url }}">查看执行记录</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">当前还没有成功闭环的回访链接。</p>
     {% endif %}
   </div>
 </section>

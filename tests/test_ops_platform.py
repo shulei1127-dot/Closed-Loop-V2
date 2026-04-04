@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from apps.api.main import app
+from core.config import get_settings
 from core.db import get_db
 from core.exceptions import EnvironmentDependencyError
 from core.runtime_state import runtime_state
@@ -99,6 +100,9 @@ def test_sync_conflict_returns_409(client) -> None:
 
 
 def test_execute_auto_retry_and_task_rerun(client, db_session, monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "false")
+    monkeypatch.setenv("VISIT_REAL_EXECUTION_ENABLED", "false")
+    get_settings.cache_clear()
     client.post("/api/sync/run", json={"module_code": "visit", "force": False})
     task = _get_planned_task(db_session, "visit")
     original_execute = VisitExecutor.execute
@@ -135,6 +139,65 @@ def test_execute_auto_retry_and_task_rerun(client, db_session, monkeypatch) -> N
     assert rerun.status_code == 200
     rerun_payload = rerun.json()["item"]
     assert rerun_payload["result_payload"]["_ops"]["trigger"] == "rerun"
+    get_settings.cache_clear()
+
+
+def test_batch_execute_pending_visit_tasks(client, db_session, monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "false")
+    monkeypatch.setenv("VISIT_REAL_EXECUTION_ENABLED", "false")
+    get_settings.cache_clear()
+    client.post("/api/sync/run", json={"module_code": "visit", "force": False})
+
+    planned_before = client.get("/api/tasks?module_code=visit&status=planned").json()["items"]
+    assert len(planned_before) >= 1
+
+    response = client.post("/api/tasks/batch/execute-pending", json={"module_code": "visit", "dry_run": False})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["module_code"] == "visit"
+    assert payload["total_count"] == len(planned_before)
+    assert payload["success_count"] >= 1
+    assert len(payload["items"]) == len(planned_before)
+
+    overview_after = client.get("/api/ops/overview")
+    visit_after = next(item for item in overview_after.json()["items"] if item["module_code"] == "visit")
+    assert visit_after["planned_tasks"] == 0
+    get_settings.cache_clear()
+
+
+def test_pending_visit_list_excludes_rows_with_existing_successful_run(client, db_session, monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
+    monkeypatch.setenv("VISIT_REAL_EXECUTION_ENABLED", "true")
+    monkeypatch.delenv("VISIT_REAL_BASE_URL", raising=False)
+    monkeypatch.delenv("VISIT_REAL_TOKEN", raising=False)
+    monkeypatch.setenv("PTS_BASE_URL", "https://pts.example.com")
+    monkeypatch.setenv("PTS_COOKIE_HEADER", "")
+    monkeypatch.setattr("services.executors.visit_real_runner.VisitRealRunner._browser_session_available", lambda self: True)
+    get_settings.cache_clear()
+    client.post("/api/sync/run", json={"module_code": "visit", "force": False})
+    task = _get_planned_task(db_session, "visit")
+
+    from services.executors.visit_real_runner import VisitRealRunOutcome, VisitRealRunner
+
+    async def fake_browser_run(self, context, actions, diagnostics):
+        diagnostics["transport_mode"] = "pts_browser_session"
+        diagnostics["config_valid"] = True
+        return VisitRealRunOutcome(
+            run_status="success",
+            final_link="https://pts.example.com/return-visit/detail/pending-hidden",
+            action_results=[{"action": "complete_visit", "status": "success", "http_status": 200}],
+            runner_diagnostics=diagnostics,
+        )
+
+    monkeypatch.setattr(VisitRealRunner, "_run_pts_browser_mode", fake_browser_run)
+    execute_response = client.post(f"/api/tasks/{task.id}/execute", json={"dry_run": False})
+    assert execute_response.status_code == 200
+    assert execute_response.json()["item"]["run_status"] == "success"
+
+    pending = client.get("/api/ops/overview").json()["items"]
+    visit_item = next(item for item in pending if item["module_code"] == "visit")
+    assert visit_item["planned_tasks"] == 0
+    get_settings.cache_clear()
 
 
 def test_execute_conflict_returns_409(client, db_session) -> None:
@@ -324,7 +387,10 @@ def test_health_readiness_returns_environment_report(client, monkeypatch) -> Non
             "app_env": "development",
             "app_debug": False,
             "database": {"ok": False, "message": "数据库不可达"},
-            "real_execution": {"enabled": False, "modules": {"visit": {"ok": False, "missing_fields": ["pts_cookie_header"]}}},
+            "real_execution": {
+                "enabled": False,
+                "modules": {"visit": {"ok": False, "missing_fields": ["pts_cookie_header"], "browser_session_available": False}},
+            },
             "scheduler": {"enabled": True, "ok": False, "message": "scheduler 读取 module config 失败"},
         },
     )

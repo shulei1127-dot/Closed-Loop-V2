@@ -145,6 +145,7 @@ class VisitExecutor:
         return ExecutionResult(
             run_status="failed",
             executor_version=self.executor_version,
+            final_link=outcome.final_link,
             error_message=outcome.error_message,
             retryable=outcome.retryable,
             result_payload=self._build_payload(

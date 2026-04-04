@@ -8,8 +8,16 @@ from apps.api.deps import get_task_execution_service
 from core.db import get_db
 from core.exceptions import OperationConflictError, ResourceNotFoundError
 from repositories.task_plan_repo import TaskPlanRepository
-from schemas.task import TaskDetailResponse, TaskExecuteRequest, TaskListResponse, TaskRunResponse
+from schemas.task import (
+    TaskBatchExecuteRequest,
+    TaskBatchExecuteResponse,
+    TaskDetailResponse,
+    TaskExecuteRequest,
+    TaskListResponse,
+    TaskRunResponse,
+)
 from schemas.common import TaskItem
+from services.ops_service import OpsService
 from services.sync_service import SyncService
 from services.task_execution_service import TaskExecutionService
 
@@ -24,7 +32,7 @@ def list_tasks(
     db: Session = Depends(get_db),
 ) -> TaskListResponse:
     repo = TaskPlanRepository(db)
-    items = repo.list_by_filters(module_code=module_code, status=status)
+    items = repo.list_latest_by_business_key(module_code=module_code, status=status)
     return TaskListResponse(
         items=[
             TaskItem(
@@ -91,3 +99,35 @@ async def rerun_task(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ResourceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/tasks/batch/execute-pending", response_model=TaskBatchExecuteResponse)
+async def execute_pending_tasks(
+    request: TaskBatchExecuteRequest,
+    db: Session = Depends(get_db),
+    service: TaskExecutionService = Depends(get_task_execution_service),
+) -> TaskBatchExecuteResponse:
+    ops_service = OpsService(db)
+    pending_items = ops_service.list_pending_tasks(module_code=request.module_code, limit=5000)
+    task_ids = [uuid.UUID(item.task_plan_id) for item in pending_items]
+
+    results = []
+    for task_id in task_ids:
+        try:
+            results.append(await service.execute_task(task_id, dry_run=request.dry_run))
+        except OperationConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ResourceNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    success_count = sum(1 for item in results if item.run_status in {"success", "simulated_success"})
+    manual_required_count = sum(1 for item in results if item.manual_required)
+    failed_count = len(results) - success_count
+    return TaskBatchExecuteResponse(
+        module_code=request.module_code,
+        total_count=len(results),
+        success_count=success_count,
+        failed_count=failed_count,
+        manual_required_count=manual_required_count,
+        items=results,
+    )

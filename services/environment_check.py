@@ -6,6 +6,7 @@ from core.config import get_settings
 from core.db import SessionLocal, probe_database_connection, safe_database_url
 from repositories.module_config_repo import ModuleConfigRepository
 from services.module_registry import default_module_configs
+from services.recognizers.visit_delivery_backfill import _find_local_chrome_user_data_dir
 
 
 MODULE_REAL_ENV_KEYS = {
@@ -70,7 +71,8 @@ class EnvironmentCheckService:
             missing_fields = []
             if not self.settings.pts_base_url:
                 missing_fields.append("pts_base_url")
-            if not self.settings.pts_cookie_header:
+            browser_session_available = _find_local_chrome_user_data_dir() is not None
+            if not browser_session_available and not self.settings.pts_cookie_header:
                 missing_fields.append("pts_cookie_header")
             if self.settings.visit_real_base_url or self.settings.visit_real_token:
                 if not self.settings.visit_real_base_url:
@@ -80,6 +82,7 @@ class EnvironmentCheckService:
             return {
                 "ok": not missing_fields,
                 "missing_fields": missing_fields,
+                "browser_session_available": browser_session_available,
             }
         missing_fields = [
             field_name

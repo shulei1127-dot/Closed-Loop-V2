@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy import select
 
+from models.normalized_record import NormalizedRecord
 from models.task_plan import TaskPlan
 from repositories.base import BaseRepository
 from schemas.sync import TaskPlanDTO
@@ -38,6 +39,32 @@ class TaskPlanRepository(BaseRepository):
         if status:
             statement = statement.where(TaskPlan.plan_status == status)
         return list(self.db.scalars(statement).all())
+
+    def list_latest_by_business_key(self, module_code: str | None, status: str | None) -> list[TaskPlan]:
+        statement = (
+            select(TaskPlan, NormalizedRecord.source_row_id)
+            .join(NormalizedRecord, NormalizedRecord.id == TaskPlan.normalized_record_id)
+            .order_by(TaskPlan.created_at.desc())
+        )
+        if module_code:
+            statement = statement.where(TaskPlan.module_code == module_code)
+
+        grouped: dict[tuple[str, str, str], TaskPlan] = {}
+        ordered: list[TaskPlan] = []
+        for task, source_row_id in self.db.execute(statement).all():
+            key = (
+                task.module_code,
+                str(source_row_id or task.normalized_record_id),
+                task.task_type,
+            )
+            if key in grouped:
+                continue
+            if status and task.plan_status != status:
+                grouped[key] = task
+                continue
+            grouped[key] = task
+            ordered.append(task)
+        return ordered
 
     def get_by_id(self, task_id: uuid.UUID) -> TaskPlan | None:
         statement = select(TaskPlan).where(TaskPlan.id == task_id)

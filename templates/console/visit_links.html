@@ -1,0 +1,43 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h3>全部闭环回访链接</h3>
+        <p>这里汇总最近成功闭环的交付转售后回访链接，方便复制和复核。</p>
+      </div>
+      <div class="topbar-actions">
+        <a href="/console">返回模块总览</a>
+      </div>
+    </div>
+    {% if visit_link_items %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>客户名称</th>
+          <th>回访类型</th>
+          <th>闭环时间</th>
+          <th>回访链接</th>
+          <th>执行记录</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in visit_link_items %}
+        <tr>
+          <td>{{ item.customer_name or '未知客户' }}</td>
+          <td>{{ item.visit_type or '未知类型' }}</td>
+          <td>{{ item.occurred_at | fmt_dt }}</td>
+          <td><a href="{{ item.final_link }}" target="_blank" rel="noreferrer">{{ item.final_link }}</a></td>
+          <td>{% if item.detail_url %}<a href="{{ item.detail_url }}">查看执行记录</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">当前还没有成功闭环的回访链接。</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

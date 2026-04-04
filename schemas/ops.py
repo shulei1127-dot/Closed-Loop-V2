@@ -70,6 +70,16 @@ class PendingTaskItem(BaseModel):
     detail_url: str | None = None
 
 
+class RecentVisitLinkItem(BaseModel):
+    customer_name: str | None = None
+    visit_type: str | None = None
+    final_link: str
+    occurred_at: datetime
+    detail_url: str | None = None
+    task_plan_id: str | None = None
+    task_run_id: str | None = None
+
+
 class PtsSessionStatusResponse(BaseModel):
     ok: bool = True
     configured: bool = False

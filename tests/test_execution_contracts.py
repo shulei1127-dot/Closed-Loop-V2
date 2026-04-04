@@ -5,6 +5,7 @@ from sqlalchemy import select
 from core.config import get_settings
 from models.normalized_record import NormalizedRecord
 from models.task_plan import TaskPlan
+from services.executors.visit_real_runner import VisitRealRunner
 
 
 CONTRACT_RUNNER_KEYS = {
@@ -65,6 +66,10 @@ def test_execution_contract_simulated_payloads_are_uniform(client, db_session, m
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.pdf")
     monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "false")
+    monkeypatch.setenv("VISIT_REAL_EXECUTION_ENABLED", "false")
+    monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "false")
+    monkeypatch.setenv("PROACTIVE_REAL_EXECUTION_ENABLED", "false")
     get_settings.cache_clear()
 
     for module_code in ("visit", "inspection", "proactive"):
@@ -129,6 +134,8 @@ def test_execution_contract_precheck_failed_config_payloads_are_uniform(
     for module_code, assertion in module_assertions.items():
         monkeypatch.setenv(assertion["enable_env"], "true")
         assertion["prepare"]()
+        if module_code == "visit":
+            monkeypatch.setattr(VisitRealRunner, "_browser_session_available", lambda self: False)
         get_settings.cache_clear()
 
         _run_sync(client, module_code)

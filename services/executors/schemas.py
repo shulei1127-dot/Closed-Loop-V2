@@ -21,6 +21,12 @@ class ExecutorContext(BaseModel):
     task_type: str
     plan_status: str
     normalized_record_id: str
+    source_row_id: str = ""
     recognition_status: str
     planned_payload: dict[str, Any] = Field(default_factory=dict)
     normalized_data: dict[str, Any] = Field(default_factory=dict)
+    source_url: str | None = None
+    source_doc_key: str | None = None
+    source_view_key: str | None = None
+    source_collector_type: str | None = None
+    source_extra_config: dict[str, Any] = Field(default_factory=dict)

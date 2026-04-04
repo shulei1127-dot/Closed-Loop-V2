@@ -6,10 +6,11 @@
     <h3>任务列表</h3>
     <form class="inline-form" method="get">
       <input type="text" name="module_code" placeholder="module_code" value="{{ module_code or '' }}">
-      <input type="text" name="status" placeholder="plan_status" value="{{ status or '' }}">
+      <input type="text" name="status" placeholder="pending / planned / skipped / all" value="{{ status or '' }}">
       <button type="submit">筛选</button>
     </form>
   </div>
+  <p class="muted">默认只展示待处理任务；如需查看全量 planner 结果，请筛选 `all`。</p>
 
   <div class="two-column">
     <div class="panel">
@@ -21,6 +22,7 @@
             <th>任务类型</th>
             <th>计划状态</th>
             <th>最近执行</th>
+            <th>回访链接</th>
             <th>业务解释</th>
             <th>操作</th>
           </tr>
@@ -40,6 +42,13 @@
                 <div class="muted">{{ latest_run.run_time | fmt_dt }}</div>
               {% else %}
                 未执行
+              {% endif %}
+            </td>
+            <td>
+              {% if latest_run and latest_run.final_link %}
+                <a href="{{ latest_run.final_link }}" target="_blank" rel="noopener noreferrer">{{ latest_run.final_link }}</a>
+              {% else %}
+                无
               {% endif %}
             </td>
             <td>
@@ -87,6 +96,9 @@
             <a href="/console/task-runs/{{ item.run.id }}">{{ item.view.display_status }}</a>
             <span class="muted">{{ item.run.run_time | fmt_dt }}</span>
             <span>{{ item.view.business_explanation }}</span>
+            {% if item.run.final_link %}
+            <a href="{{ item.run.final_link }}" target="_blank" rel="noopener noreferrer">回访链接</a>
+            {% endif %}
           </li>
           {% endfor %}
         </ul>

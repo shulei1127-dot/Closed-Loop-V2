@@ -8,7 +8,7 @@ from repositories.normalized_record_repo import NormalizedRecordRepository
 from repositories.task_plan_repo import TaskPlanRepository
 from repositories.task_run_repo import TaskRunRepository
 from repositories.source_snapshot_repo import SourceSnapshotRepository
-from schemas.ops import OpsEventItem, OpsOverviewItem, PendingTaskItem
+from schemas.ops import OpsEventItem, OpsOverviewItem, PendingTaskItem, RecentVisitLinkItem
 from services.ops_copy import build_run_view, status_label
 from services.sync_service import SyncService
 
@@ -37,7 +37,7 @@ class OpsService:
             failed_task_count = 0
             manual_required_count = 0
             retryable_task_count = 0
-            tasks = self.task_repo.list_by_filters(module_code=summary.module_code, status=None)
+            tasks = self.task_repo.list_latest_by_business_key(module_code=summary.module_code, status=None)
             latest_runs_by_task_id = self._latest_runs_by_task_ids(tasks)
             pending_task_count = len(self._collect_pending_task_groups(module_code=summary.module_code))
             for task in tasks:
@@ -153,6 +153,40 @@ class OpsService:
             reverse=True,
         )
         return items[:limit]
+
+    def list_recent_visit_links(self, limit: int | None = 10) -> list[RecentVisitLinkItem]:
+        items: list[RecentVisitLinkItem] = []
+        seen_links: set[str] = set()
+        recent_limit = max((limit or 100) * 10, 50)
+        for task_run in self.task_run_repo.list_recent(limit=recent_limit):
+            if task_run.run_status not in {"success", "simulated_success"} or task_run.manual_required:
+                continue
+            result_payload = task_run.result_payload or {}
+            final_link = result_payload.get("final_link") or getattr(task_run, "final_link", None)
+            if not final_link or final_link in seen_links:
+                continue
+            task_plan = self.task_repo.get_by_id(task_run.task_plan_id)
+            if task_plan is None or task_plan.module_code != "visit":
+                continue
+            record = self.record_repo.get_by_id(task_plan.normalized_record_id)
+            normalized_data = (getattr(record, "normalized_data", {}) or {}) if record else {}
+            customer_name = self._resolve_customer_name(result_payload, record)
+            visit_type = normalized_data.get("visit_type") or (task_plan.planned_payload or {}).get("visit_type")
+            items.append(
+                RecentVisitLinkItem(
+                    customer_name=customer_name,
+                    visit_type=visit_type,
+                    final_link=str(final_link),
+                    occurred_at=task_run.run_time,
+                    detail_url=f"/console/task-runs/{task_run.id}",
+                    task_plan_id=str(task_plan.id),
+                    task_run_id=str(task_run.id),
+                )
+            )
+            seen_links.add(str(final_link))
+            if limit is not None and len(items) >= limit:
+                break
+        return items
 
     def list_failures(self, limit: int = 20) -> list[OpsEventItem]:
         items: list[OpsEventItem] = []
@@ -293,11 +327,13 @@ class OpsService:
         return latest_runs_by_task_id
 
     def _collect_pending_task_groups(self, module_code: str | None = None) -> list[dict[str, object]]:
-        tasks = self.task_repo.list_by_filters(module_code=module_code, status=None)
+        tasks = self.task_repo.list_latest_by_business_key(module_code=module_code, status=None)
         latest_runs_by_task_id = self._latest_runs_by_task_ids(tasks)
+        records_by_id = self.record_repo.get_by_ids([task.normalized_record_id for task in tasks])
+        successful_keys = self.task_run_repo.list_successful_business_keys(module_code=module_code)
         grouped: dict[tuple[str, str, str], dict[str, object]] = {}
         for task in tasks:
-            record = self.record_repo.get_by_id(task.normalized_record_id)
+            record = records_by_id.get(task.normalized_record_id)
             source_row_id = getattr(record, "source_row_id", None) or str(task.normalized_record_id)
             key = (task.module_code, source_row_id, task.task_type)
             latest_run = latest_runs_by_task_id.get(task.id)
@@ -314,10 +350,14 @@ class OpsService:
         pending_groups: list[dict[str, object]] = []
         for group in grouped.values():
             task = group["task"]
+            record = group["record"]
+            source_row_id = getattr(record, "source_row_id", None) or str(task.normalized_record_id)
             if task.plan_status != "planned":
                 continue
+            if (task.module_code, source_row_id, task.task_type) in successful_keys:
+                continue
             all_runs = group["all_runs"]
-            if any(run.run_status == "success" and not run.manual_required for run in all_runs):
+            if any(run.run_status in {"success", "simulated_success"} and not run.manual_required for run in all_runs):
                 continue
             if any(run.manual_required for run in all_runs):
                 continue

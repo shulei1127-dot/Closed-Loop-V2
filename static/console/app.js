@@ -61,6 +61,17 @@ async function handleExecute(button) {
   scheduleRefresh();
 }
 
+async function handleExecuteAllVisit(button) {
+  const totalCount = Number.parseInt(button.dataset.totalCount || "0", 10);
+  if (!window.confirm(`将按顺序创建并闭环全部待执行回访任务（当前 ${totalCount} 条）。是否继续？`)) {
+    return;
+  }
+  renderFeedback("warning", "正在批量创建并闭环待执行回访...", { module_code: "visit", total_count: totalCount });
+  const result = await postJson("/api/tasks/batch/execute-pending", { module_code: "visit", dry_run: false });
+  renderFeedback("success", "批量执行完成", result);
+  scheduleRefresh(1800);
+}
+
 async function handleTaskRerun(button) {
   const taskId = button.dataset.taskId;
   const dryRun = button.dataset.dryRun === "true";
@@ -118,6 +129,10 @@ document.addEventListener("click", async (event) => {
     }
     if (button.dataset.action === "execute") {
       await handleExecute(button);
+      return;
+    }
+    if (button.dataset.action === "execute-all-visit") {
+      await handleExecuteAllVisit(button);
       return;
     }
     if (button.dataset.action === "rerun-task") {
