@@ -47,6 +47,11 @@ templates.env.filters["fmt_dt"] = _format_local_datetime
 router = APIRouter()
 
 
+def _module_summary_map(db: Session) -> dict[str, dict]:
+    ops_service = OpsService(db)
+    return {item.module_code: item.model_dump() for item in ops_service.build_overview()}
+
+
 @router.get("/", response_class=HTMLResponse)
 def root() -> RedirectResponse:
     return RedirectResponse(url="/console", status_code=302)
@@ -56,6 +61,10 @@ def root() -> RedirectResponse:
 def console_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     ops_service = OpsService(db)
     pts_session_status = PtsSessionService().get_status()
+    inspection_month = request.query_params.get("inspection_month") or datetime.now(LOCAL_TZ).strftime("%Y-%m")
+    available_inspection_months = ops_service.list_pending_inspection_months()
+    if inspection_month not in available_inspection_months and available_inspection_months:
+        inspection_month = available_inspection_months[0]
     return templates.TemplateResponse(
         name="console/dashboard.html",
         request=request,
@@ -65,9 +74,80 @@ def console_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLRe
             "failure_items": [item.model_dump() for item in ops_service.list_failures(limit=10)],
             "manual_required_items": [item.model_dump() for item in ops_service.list_manual_required(limit=10)],
             "pending_visit_items": [item.model_dump() for item in ops_service.list_pending_tasks(module_code="visit", limit=20)],
+            "pending_inspection_items": [
+                item.model_dump()
+                for item in ops_service.list_pending_tasks(module_code="inspection", limit=50, month=inspection_month)
+            ],
+            "inspection_month": inspection_month,
+            "available_inspection_months": available_inspection_months,
+            "recent_inspection_closures": [
+                item.model_dump()
+                for item in ops_service.list_recent_inspection_closures(month=inspection_month, limit=10)
+            ],
             "recent_visit_links": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=10)],
             "pts_session_status": pts_session_status,
             "active_nav": "dashboard",
+        },
+    )
+
+
+@router.get("/console/modules/visit", response_class=HTMLResponse)
+def console_visit_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    ops_service = OpsService(db)
+    return templates.TemplateResponse(
+        name="console/module_visit.html",
+        request=request,
+        context={
+            "page_title": "交付转售后回访",
+            "module_summary": _module_summary_map(db).get("visit"),
+            "pending_visit_items": [item.model_dump() for item in ops_service.list_pending_tasks(module_code="visit", limit=100)],
+            "recent_visit_links": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=20)],
+            "active_nav": "module_visit",
+        },
+    )
+
+
+@router.get("/console/modules/inspection", response_class=HTMLResponse)
+def console_inspection_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    ops_service = OpsService(db)
+    inspection_month = request.query_params.get("inspection_month") or datetime.now(LOCAL_TZ).strftime("%Y-%m")
+    available_inspection_months = ops_service.list_pending_inspection_months()
+    if inspection_month not in available_inspection_months and available_inspection_months:
+        inspection_month = available_inspection_months[0]
+    return templates.TemplateResponse(
+        name="console/module_inspection.html",
+        request=request,
+        context={
+            "page_title": "巡检工单闭环",
+            "module_summary": _module_summary_map(db).get("inspection"),
+            "pending_inspection_items": [
+                item.model_dump()
+                for item in ops_service.list_pending_tasks(module_code="inspection", limit=100, month=inspection_month)
+            ],
+            "inspection_month": inspection_month,
+            "available_inspection_months": available_inspection_months,
+            "recent_inspection_closures": [
+                item.model_dump()
+                for item in ops_service.list_recent_inspection_closures(month=inspection_month, limit=10)
+            ],
+            "active_nav": "module_inspection",
+        },
+    )
+
+
+@router.get("/console/modules/proactive", response_class=HTMLResponse)
+def console_proactive_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    ops_service = OpsService(db)
+    return templates.TemplateResponse(
+        name="console/module_proactive.html",
+        request=request,
+        context={
+            "page_title": "超半年主动回访",
+            "module_summary": _module_summary_map(db).get("proactive"),
+            "pending_proactive_items": [
+                item.model_dump() for item in ops_service.list_pending_tasks(module_code="proactive", limit=100)
+            ],
+            "active_nav": "module_proactive",
         },
     )
 
@@ -82,6 +162,25 @@ def console_visit_links(request: Request, db: Session = Depends(get_db)) -> HTML
             "page_title": "闭环回访链接",
             "visit_link_items": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=None)],
             "active_nav": "dashboard",
+        },
+    )
+
+
+@router.get("/console/inspection-links", response_class=HTMLResponse)
+def console_inspection_links(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
+    ops_service = OpsService(db)
+    inspection_month = request.query_params.get("inspection_month") or datetime.now(LOCAL_TZ).strftime("%Y-%m")
+    return templates.TemplateResponse(
+        name="console/inspection_links.html",
+        request=request,
+        context={
+            "page_title": "全部巡检闭环记录",
+            "inspection_month": inspection_month,
+            "inspection_link_items": [
+                item.model_dump()
+                for item in ops_service.list_recent_inspection_closures(month=inspection_month, limit=None)
+            ],
+            "active_nav": "module_inspection",
         },
     )
 
@@ -116,6 +215,7 @@ def console_tasks(
     request: Request,
     module_code: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    month: str | None = Query(default=None),
     task_id: uuid.UUID | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> HTMLResponse:
@@ -126,7 +226,7 @@ def console_tasks(
     ops_service = OpsService(db)
     effective_status = status or "pending"
     if effective_status == "pending":
-        pending_groups = ops_service._collect_pending_task_groups(module_code=module_code)
+        pending_groups = ops_service._collect_pending_task_groups(module_code=module_code, month=month)
         tasks = [group["task"] for group in pending_groups]
         tasks.sort(key=lambda item: item.created_at, reverse=True)
     else:
@@ -206,6 +306,7 @@ def console_tasks(
             "selected_task_id": str(task_id) if task_id else None,
             "module_code": module_code,
             "status": effective_status,
+            "month": month,
             "failure_items": failure_items,
             "manual_required_items": manual_required_items,
             "active_nav": "tasks",

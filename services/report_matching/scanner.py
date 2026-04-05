@@ -4,6 +4,7 @@ from pathlib import Path
 
 from services.report_matching.normalizer import (
     DEFAULT_RULES,
+    canonicalize_filename,
     extract_customer_name_candidate,
     file_type_for,
     is_allowed_extension,
@@ -38,6 +39,7 @@ class InspectionReportScanner:
                 ReportFileIndexItem(
                     path=str(path),
                     filename=filename,
+                    canonical_filename=canonicalize_filename(filename),
                     extension=path.suffix.lower(),
                     file_type=file_type,
                     normalized_name=normalize_filename_stem(filename, self.rules),

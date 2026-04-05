@@ -26,6 +26,7 @@ from services.module_registry import MODULE_DEFINITIONS, default_module_configs,
 from services.planners.inspection_planner import InspectionPlanner
 from services.planners.proactive_planner import ProactivePlanner
 from services.planners.visit_planner import VisitPlanner
+from services.recognizers.inspection_work_order_backfill import InspectionWorkOrderStageBackfill
 from services.recognizers.inspection_recognizer import InspectionRecognizer
 from services.recognizers.proactive_recognizer import ProactiveRecognizer
 from services.recognizers.visit_delivery_backfill import VisitDeliveryIdBackfill
@@ -52,6 +53,7 @@ PLANNER_REGISTRY = {
 
 ENRICHER_REGISTRY = {
     "visit": VisitDeliveryIdBackfill,
+    "inspection": InspectionWorkOrderStageBackfill,
 }
 
 

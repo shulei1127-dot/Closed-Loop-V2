@@ -89,6 +89,7 @@ class _PtsRunnerError(Exception):
 class _PtsBrowserSession:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._current_project_url: str | None = None
 
     async def __aenter__(self) -> "_PtsBrowserSession":
         if _find_local_chrome_user_data_dir() is None:
@@ -116,17 +117,41 @@ class _PtsBrowserSession:
         return None
 
     async def open_project(self, target: str) -> dict[str, Any]:
+        normalized_target = strip_url_fragment(target)
         try:
             final_url = await self._run_applescript(
                 f'''
                 tell application "Google Chrome"
                   activate
-                  set targetUrl to {json.dumps(strip_url_fragment(target))}
+                  set targetUrl to {json.dumps(normalized_target)}
                   if (count of windows) = 0 then make new window
-                  tell front window
-                    make new tab with properties {{URL:targetUrl}}
-                    set active tab index to (count of tabs)
-                  end tell
+                  set matchedWindowIndex to 0
+                  set matchedTabIndex to 0
+                  repeat with windowIndex from 1 to count of windows
+                    tell window windowIndex
+                      repeat with tabIndex from 1 to count of tabs
+                        set currentUrl to URL of tab tabIndex
+                        if currentUrl contains "pts.chaitin.net/project/" then
+                          set matchedWindowIndex to windowIndex
+                          set matchedTabIndex to tabIndex
+                          exit repeat
+                        end if
+                      end repeat
+                    end tell
+                    if matchedWindowIndex is not 0 then exit repeat
+                  end repeat
+                  if matchedWindowIndex is 0 then
+                    tell front window
+                      make new tab with properties {{URL:targetUrl}}
+                      set active tab index to (count of tabs)
+                    end tell
+                  else
+                    set index of window matchedWindowIndex to 1
+                    tell front window
+                      set active tab index to matchedTabIndex
+                      set URL of active tab to targetUrl
+                    end tell
+                  end if
                   delay 2
                   return URL of active tab of front window
                 end tell
@@ -227,6 +252,53 @@ class _PtsBrowserSession:
                 retryable=False,
             )
         return data
+
+    async def read_page_text(self, *, limit: int = 4000) -> str:
+        js = f"document.body ? document.body.innerText.slice(0,{int(limit)}) : ''"
+        return await self._run_applescript(
+            f'''
+            tell application "Google Chrome"
+              return execute active tab of front window javascript {json.dumps(js)}
+            end tell
+            '''
+        )
+
+    async def execute_js(self, script: str) -> Any:
+        raw = await self._run_applescript(
+            f'''
+            tell application "Google Chrome"
+              return execute active tab of front window javascript {json.dumps(script, ensure_ascii=False)}
+            end tell
+            '''
+        )
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+
+    async def send_key_code(self, key_code: int) -> None:
+        await self._run_applescript(
+            f'''
+            tell application "Google Chrome" to activate
+            tell application "System Events"
+              key code {key_code}
+            end tell
+            '''
+        )
+
+    async def send_key_code_repeated(self, key_code: int, count: int) -> None:
+        count = max(1, int(count))
+        await self._run_applescript(
+            f'''
+            tell application "Google Chrome" to activate
+            tell application "System Events"
+              repeat {count} times
+                key code {key_code}
+                delay 0.03
+              end repeat
+            end tell
+            '''
+        )
 
     async def _run_applescript(self, script: str) -> str:
         def _invoke() -> subprocess.CompletedProcess[str]:

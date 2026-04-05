@@ -62,6 +62,11 @@ class PendingTaskItem(BaseModel):
     customer_name: str | None = None
     delivery_id: str | None = None
     visit_type: str | None = None
+    inspection_month: str | None = None
+    executor_name: str | None = None
+    work_order_link: str | None = None
+    work_order_closed: bool | None = None
+    report_word_file: str | None = None
     planned_payload: dict = Field(default_factory=dict)
     latest_run_status: str | None = None
     latest_run_status_label: str | None = None
@@ -73,6 +78,16 @@ class PendingTaskItem(BaseModel):
 class RecentVisitLinkItem(BaseModel):
     customer_name: str | None = None
     visit_type: str | None = None
+    final_link: str
+    occurred_at: datetime
+    detail_url: str | None = None
+    task_plan_id: str | None = None
+    task_run_id: str | None = None
+
+
+class RecentInspectionClosureItem(BaseModel):
+    customer_name: str | None = None
+    inspection_month: str | None = None
     final_link: str
     occurred_at: datetime
     detail_url: str | None = None

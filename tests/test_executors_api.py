@@ -523,9 +523,8 @@ def test_inspection_execute_returns_manual_required_without_reports(client, db_s
     get_settings.cache_clear()
 
 
-def test_inspection_execute_returns_simulated_success_with_reports(client, db_session, monkeypatch, tmp_path) -> None:
+def test_inspection_execute_requires_real_execution_with_reports(client, db_session, monkeypatch, tmp_path) -> None:
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
-    _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.pdf")
     monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
     get_settings.cache_clear()
     _run_sync(client, "inspection")
@@ -535,13 +534,14 @@ def test_inspection_execute_returns_simulated_success_with_reports(client, db_se
     assert response.status_code == 200
     payload = response.json()["item"]
 
-    assert payload["run_status"] == "simulated_success"
+    assert payload["run_status"] == "precheck_failed"
     assert payload["manual_required"] is False
     assert payload["result_payload"]["report_match"]["matched"] is True
-    assert payload["result_payload"]["execution_mode"] == "simulated"
+    assert payload["result_payload"]["execution_mode"] == "real_precheck"
     assert payload["result_payload"]["runner_diagnostics"]["mode"] == "simulated"
     assert payload["result_payload"]["upload_candidates"]["word"]
-    assert payload["result_payload"]["upload_candidates"]["pdf"]
+    assert "pdf" not in payload["result_payload"]["upload_candidates"]
+    assert "不允许模拟闭环" in (payload["error_message"] or "")
     get_settings.cache_clear()
 
 
@@ -552,7 +552,6 @@ def test_inspection_precheck_fails_when_real_execution_enabled_but_config_missin
     tmp_path,
 ) -> None:
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
-    _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.pdf")
     monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
     monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
     monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "true")
@@ -581,7 +580,6 @@ def test_inspection_execute_runs_real_runner_successfully(
     inspection_real_server,
 ) -> None:
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
-    _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.pdf")
     monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
     monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
     monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "true")
@@ -610,16 +608,19 @@ def test_inspection_execute_runs_real_runner_successfully(
     assert payload["run_status"] == "success"
     assert payload["result_payload"]["execution_mode"] == "real"
     assert payload["result_payload"]["runner_diagnostics"]["mode"] == "real"
-    assert len(payload["result_payload"]["action_results"]) == 4
+    assert len(payload["result_payload"]["action_results"]) == 5
     assert payload["result_payload"]["action_results"][0]["action"] == "open_inspection_work_order"
     assert payload["result_payload"]["action_results"][1]["action"] == "assign_owner"
     assert payload["result_payload"]["action_results"][2]["action"] == "upload_report_files"
     assert payload["result_payload"]["action_results"][3]["action"] == "complete_inspection"
+    assert payload["result_payload"]["action_results"][4]["action"] == "archive_uploaded_reports"
     assert payload["final_link"] == f"{inspection_real_server['base_url']}/inspection-work-orders/WO-REAL-001/completed"
     assert inspection_real_server["request_log"][0]["method"] == "GET"
     assert inspection_real_server["request_log"][1]["path"].endswith("/assign-owner")
     assert inspection_real_server["request_log"][2]["path"].endswith("/upload-reports")
     assert inspection_real_server["request_log"][3]["path"].endswith("/complete")
+    assert (tmp_path / "已上传的文档" / "南京真实客户雷池巡检报告-2026.03.27.docx").exists()
+    assert not (tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx").exists()
     get_settings.cache_clear()
 
 
@@ -631,7 +632,6 @@ def test_inspection_execute_upload_failure_records_diagnostics(
     inspection_real_server,
 ) -> None:
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
-    _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.pdf")
     monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
     monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
     monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "true")
@@ -674,7 +674,6 @@ def test_inspection_execute_assign_owner_add_member_then_success(
     inspection_real_server,
 ) -> None:
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
-    _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.pdf")
     monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
     monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
     monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "true")
@@ -709,10 +708,11 @@ def test_inspection_execute_assign_owner_add_member_then_success(
         "assign_owner",
         "upload_report_files",
         "complete_inspection",
+        "archive_uploaded_reports",
     ]
     assert payload["result_payload"]["action_results"][1]["status"] == "member_missing"
     assert payload["result_payload"]["action_results"][2]["status"] == "success"
-    assert payload["result_payload"]["runner_diagnostics"]["attempted_actions"][-1] == "complete_inspection"
+    assert payload["result_payload"]["runner_diagnostics"]["attempted_actions"][-1] == "archive_uploaded_reports"
     get_settings.cache_clear()
 
 
@@ -724,7 +724,6 @@ def test_inspection_execute_permission_denied_returns_manual_required(
     inspection_real_server,
 ) -> None:
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
-    _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.pdf")
     monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
     monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
     monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "true")

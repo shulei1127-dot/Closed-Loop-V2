@@ -18,6 +18,9 @@
       </div>
       <nav class="nav">
         <a href="/console" class="{{ 'active' if active_nav == 'dashboard' else '' }}">模块总览</a>
+        <a href="/console/modules/visit" class="{{ 'active' if active_nav == 'module_visit' else '' }}">交付转售后回访</a>
+        <a href="/console/modules/inspection" class="{{ 'active' if active_nav == 'module_inspection' else '' }}">巡检工单闭环</a>
+        <a href="/console/modules/proactive" class="{{ 'active' if active_nav == 'module_proactive' else '' }}">超半年主动回访</a>
         <a href="/console/snapshots" class="{{ 'active' if active_nav == 'snapshots' else '' }}">快照</a>
         <a href="/console/tasks" class="{{ 'active' if active_nav == 'tasks' else '' }}">任务</a>
         <a href="/console/records" class="{{ 'active' if active_nav == 'records' else '' }}">记录</a>

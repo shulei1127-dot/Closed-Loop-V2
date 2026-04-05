@@ -40,7 +40,7 @@ def test_visit_planner_marks_only_matching_rows_as_planned() -> None:
     assert "customer_name" in (result[1].skip_reason or "")
 
 
-def test_inspection_planner_uses_boolean_flag() -> None:
+def test_inspection_planner_uses_updated_eligibility_rules() -> None:
     planner = InspectionPlanner()
     result = planner.plan(
         [
@@ -48,8 +48,12 @@ def test_inspection_planner_uses_boolean_flag() -> None:
                 "source_row_id": "inspection-001",
                 "recognition_status": "full",
                 "normalized_data": {
+                    "inspection_month": "2026-03",
                     "customer_name": "南京客户",
+                    "service_type": "巡检服务",
+                    "executor_name": "舒磊",
                     "inspection_done": True,
+                    "work_order_closed": False,
                     "work_order_link": "https://wo.example.com/1",
                 },
             },
@@ -57,8 +61,12 @@ def test_inspection_planner_uses_boolean_flag() -> None:
                 "source_row_id": "inspection-002",
                 "recognition_status": "full",
                 "normalized_data": {
+                    "inspection_month": "2026-03",
                     "customer_name": "苏州客户",
-                    "inspection_done": False,
+                    "service_type": "巡检服务",
+                    "executor_name": "李四",
+                    "inspection_done": True,
+                    "work_order_closed": False,
                     "work_order_link": "https://wo.example.com/2",
                 },
             },
@@ -66,9 +74,35 @@ def test_inspection_planner_uses_boolean_flag() -> None:
     )
     assert result[0].eligibility is True
     assert result[0].plan_status == "planned"
+    assert result[0].planned_payload["inspection_month"] == "2026-03"
     assert result[1].eligibility is False
     assert result[1].plan_status == "skipped"
-    assert result[1].skip_reason == "不满足 customer_name 存在、inspection_done=true、且工单链接或工单ID存在"
+    assert result[1].skip_reason == "不满足 customer_name 存在、service_type 含巡检、executor_name=舒磊、inspection_done=true、work_order_closed!=true、且工单链接或工单ID存在"
+
+
+def test_inspection_planner_skips_records_already_in_review_stage() -> None:
+    planner = InspectionPlanner()
+    result = planner.plan(
+        [
+            {
+                "source_row_id": "inspection-closed-001",
+                "recognition_status": "full",
+                "normalized_data": {
+                    "inspection_month": "2026-03",
+                    "customer_name": "昆明客户",
+                    "service_type": "巡检服务",
+                    "executor_name": "舒磊",
+                    "inspection_done": True,
+                    "work_order_closed": True,
+                    "work_order_stage": "审核工单",
+                    "work_order_link": "https://wo.example.com/closed",
+                },
+            }
+        ]
+    )
+    assert result[0].eligibility is False
+    assert result[0].plan_status == "skipped"
+    assert result[0].planned_payload["work_order_stage"] == "审核工单"
 
 
 def test_proactive_planner_requires_liaison_and_empty_visit_link() -> None:

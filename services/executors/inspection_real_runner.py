@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Any
 from urllib.parse import urlparse
 
@@ -174,6 +175,18 @@ class InspectionRealRunner:
                         fallback_message="完成巡检工单处理失败",
                     )
 
+                archive_result = normalize_action_result(
+                    self._archive_uploaded_reports(upload_result.get("uploaded_files", []))
+                )
+                action_results.append(archive_result)
+                if archive_result["status"] != "success":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=archive_result,
+                        fallback_message="归档巡检报告失败",
+                    )
+
                 final_link = complete_result.get("final_link") or work_order_link
                 action_results = refresh_runner_diagnostics(diagnostics, action_results)
                 mark_runner_success(diagnostics)
@@ -244,7 +257,7 @@ class InspectionRealRunner:
         files_payload: list[tuple[str, tuple[str, bytes, str]]] = []
         uploaded_files: list[str] = []
         try:
-            for file_type in ("word", "pdf"):
+            for file_type in ("word",):
                 for file_path in report_match.matched_files.get(file_type, []):
                     path = Path(file_path)
                     files_payload.append(
@@ -288,6 +301,7 @@ class InspectionRealRunner:
                 "status": "success",
                 "http_status": response.status_code,
                 "uploaded_files": uploaded_files,
+                "uploaded_word_files": uploaded_files,
             }
         except httpx.TimeoutException:
             return {
@@ -452,6 +466,36 @@ class InspectionRealRunner:
                 "retryable": True,
             }
 
+    def _archive_uploaded_reports(self, uploaded_files: list[str]) -> dict[str, Any]:
+        archive_root = Path(self.settings.inspection_report_root) / "已上传的文档"
+        archive_root.mkdir(parents=True, exist_ok=True)
+        archived_files: list[str] = []
+        try:
+            for file_path in uploaded_files:
+                source = Path(file_path)
+                if not source.exists():
+                    continue
+                target = archive_root / source.name
+                if target.exists():
+                    target = archive_root / f"{source.stem}-{self._timestamp_suffix(source)}{source.suffix}"
+                shutil.move(str(source), str(target))
+                archived_files.append(str(target))
+        except OSError as exc:
+            return {
+                "action": "archive_uploaded_reports",
+                "status": "failed",
+                "error_type": "unknown_error",
+                "error_message": f"归档巡检报告失败: {exc}",
+                "retryable": False,
+                "archived_files": archived_files,
+            }
+        return {
+            "action": "archive_uploaded_reports",
+            "status": "success",
+            "archived_files": archived_files,
+            "archive_root": str(archive_root),
+        }
+
     def _base_diagnostics(self) -> dict[str, Any]:
         return build_runner_diagnostics(
             module_code="inspection",
@@ -482,6 +526,11 @@ class InspectionRealRunner:
             action_results=action_results,
             runner_diagnostics=diagnostics,
         )
+
+    @staticmethod
+    def _timestamp_suffix(path: Path) -> str:
+        stat = path.stat()
+        return str(int(stat.st_mtime))
 
     def _manual_required_outcome(
         self,

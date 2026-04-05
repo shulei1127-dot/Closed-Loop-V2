@@ -7,6 +7,7 @@
     <form class="inline-form" method="get">
       <input type="text" name="module_code" placeholder="module_code" value="{{ module_code or '' }}">
       <input type="text" name="status" placeholder="pending / planned / skipped / all" value="{{ status or '' }}">
+      <input type="text" name="month" placeholder="YYYY-MM" value="{{ month or '' }}">
       <button type="submit">筛选</button>
     </form>
   </div>
@@ -32,7 +33,7 @@
           {% set task = row.task %}
           {% set latest_run = row.latest_run %}
           <tr class="{{ 'selected' if selected_task_id == task.id|string else '' }}">
-            <td><a href="/console/tasks?module_code={{ module_code or '' }}&status={{ status or '' }}&task_id={{ task.id }}">{{ task.module_code }}</a></td>
+            <td><a href="/console/tasks?module_code={{ module_code or '' }}&status={{ status or '' }}&month={{ month or '' }}&task_id={{ task.id }}">{{ task.module_code }}</a></td>
             <td>{{ row.customer_name or '未知客户' }}</td>
             <td>{{ task.task_type }}</td>
             <td><span class="badge status-{{ task.plan_status }}">{{ '待执行' if task.plan_status == 'planned' else '已跳过' if task.plan_status == 'skipped' else task.plan_status }}</span></td>

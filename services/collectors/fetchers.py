@@ -389,7 +389,7 @@ class DingtalkPayloadFetcher:
 
     @staticmethod
     def _use_parallelv2_binary_mode(config: ModuleSourceConfig) -> bool:
-        return config.module_code == "visit" and bool(config.get_extra("parallelv2_enabled"))
+        return bool(config.get_extra("parallelv2_enabled"))
 
     @staticmethod
     def _extract_parallelv2_access_token(config: ModuleSourceConfig, payload: dict[str, Any]) -> str | None:

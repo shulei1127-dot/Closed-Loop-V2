@@ -14,6 +14,7 @@ class ReportMatchingRules(BaseModel):
 class ReportFileIndexItem(BaseModel):
     path: str
     filename: str
+    canonical_filename: str
     extension: str
     file_type: str
     normalized_name: str

@@ -26,7 +26,7 @@ class InspectionExecutor:
         self.settings = settings or get_settings()
         self.report_root = self.settings.inspection_report_root
         self.scanner = scanner or InspectionReportScanner(self.report_root)
-        self.matcher = matcher or InspectionReportMatcher()
+        self.matcher = matcher or InspectionReportMatcher(required_file_types=("word",))
         self.real_runner = real_runner or InspectionRealRunner(self.settings)
 
     def precheck(self, context: ExecutorContext) -> ExecutionResult:
@@ -43,6 +43,10 @@ class InspectionExecutor:
             )
         if context.normalized_data.get("inspection_done") is not True:
             return self._precheck_failed("inspection_done != true，禁止执行", context)
+        if context.normalized_data.get("executor_name") != "舒磊":
+            return self._precheck_failed("executor_name != 舒磊，禁止执行", context)
+        if context.normalized_data.get("work_order_closed") is True:
+            return self._precheck_failed("work_order_closed == true，禁止执行", context)
 
         match_result = self._match_report(context)
         if match_result.manual_required:
@@ -72,17 +76,13 @@ class InspectionExecutor:
                 ),
             )
 
-        return ExecutionResult(
-            run_status="precheck_passed",
-            executor_version=self.executor_version,
-            result_payload=self._build_payload(
-                context,
-                actions=actions,
-                match_result=match_result,
-                execution_mode="simulated",
-                runner_diagnostics=self._simulated_runner_diagnostics(reason="real_execution_disabled"),
-                precheck_summary={"real_execution_ready": False},
-            ),
+        return self._precheck_failed(
+            "巡检真实执行未启用，当前不允许模拟闭环",
+            context,
+            actions=actions,
+            match_result=match_result,
+            runner_diagnostics=self._simulated_runner_diagnostics(reason="real_execution_disabled"),
+            payload={"reason": "inspection_real_execution_required"},
         )
 
     async def dry_run(self, context: ExecutorContext) -> ExecutionResult:
@@ -110,18 +110,13 @@ class InspectionExecutor:
             return self._manual_required(context, match_result, actions=actions)
 
         if not self._should_use_real_execution():
-            final_link = context.normalized_data.get("work_order_link")
-            return ExecutionResult(
-                run_status="simulated_success",
-                executor_version=self.executor_version,
-                final_link=str(final_link) if final_link else None,
-                result_payload=self._build_payload(
-                    context,
-                    actions=actions,
-                    match_result=match_result,
-                    execution_mode="simulated",
-                    runner_diagnostics=self._simulated_runner_diagnostics(reason="real_execution_disabled"),
-                ),
+            return self._precheck_failed(
+                "巡检真实执行未启用，当前不允许模拟闭环",
+                context,
+                actions=actions,
+                match_result=match_result,
+                runner_diagnostics=self._simulated_runner_diagnostics(reason="real_execution_disabled"),
+                payload={"reason": "inspection_real_execution_required"},
             )
 
         valid, diagnostics, error_message = self.real_runner.validate()
@@ -218,6 +213,7 @@ class InspectionExecutor:
         required_fields = {
             "customer_name": data.get("customer_name"),
             "inspection_done": data.get("inspection_done"),
+            "executor_name": data.get("executor_name"),
         }
         missing = [key for key, value in required_fields.items() if value in (None, "", False)]
         if not data.get("work_order_link") and not data.get("work_order_id"):
@@ -255,11 +251,15 @@ class InspectionExecutor:
             {
                 "action": "upload_report_files",
                 "word_files": upload_files.get("word", []),
-                "pdf_files": upload_files.get("pdf", []),
             },
             {
                 "action": "complete_inspection",
                 "work_order_link": context.normalized_data.get("work_order_link"),
+            },
+            {
+                "action": "archive_uploaded_reports",
+                "archive_root": f"{self.report_root.rstrip('/')}/已上传的文档",
+                "word_files": upload_files.get("word", []),
             },
         ]
 
@@ -281,7 +281,7 @@ class InspectionExecutor:
                 context,
                 actions=actions,
                 match_result=match_result,
-                execution_mode="real_precheck" if self._should_use_real_execution() else "simulated",
+                execution_mode="real_precheck",
                 runner_diagnostics=runner_diagnostics or self._simulated_runner_diagnostics(reason="precheck_failed"),
                 extra_payload=payload,
             ),

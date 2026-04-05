@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
+from core.config import get_settings
 from core.runtime_state import runtime_state
 from repositories.module_config_repo import ModuleConfigRepository
 from repositories.normalized_record_repo import NormalizedRecordRepository
 from repositories.task_plan_repo import TaskPlanRepository
 from repositories.task_run_repo import TaskRunRepository
 from repositories.source_snapshot_repo import SourceSnapshotRepository
-from schemas.ops import OpsEventItem, OpsOverviewItem, PendingTaskItem, RecentVisitLinkItem
+from schemas.ops import (
+    OpsEventItem,
+    OpsOverviewItem,
+    PendingTaskItem,
+    RecentInspectionClosureItem,
+    RecentVisitLinkItem,
+)
+from services.report_matching.matcher import InspectionReportMatcher
+from services.report_matching.scanner import InspectionReportScanner
 from services.ops_copy import build_run_view, status_label
 from services.sync_service import SyncService
 
@@ -17,11 +28,14 @@ class OpsService:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.sync_service = SyncService(db)
+        self.settings = get_settings()
         self.module_repo = ModuleConfigRepository(db)
         self.snapshot_repo = SourceSnapshotRepository(db)
         self.record_repo = NormalizedRecordRepository(db)
         self.task_repo = TaskPlanRepository(db)
         self.task_run_repo = TaskRunRepository(db)
+        self.inspection_report_scanner = InspectionReportScanner(self.settings.inspection_report_root)
+        self.inspection_report_matcher = InspectionReportMatcher(required_file_types=("word",))
 
     def build_overview(self) -> list[OpsOverviewItem]:
         module_summaries = self.sync_service.build_module_summaries()
@@ -39,7 +53,10 @@ class OpsService:
             retryable_task_count = 0
             tasks = self.task_repo.list_latest_by_business_key(module_code=summary.module_code, status=None)
             latest_runs_by_task_id = self._latest_runs_by_task_ids(tasks)
-            pending_task_count = len(self._collect_pending_task_groups(module_code=summary.module_code))
+            pending_month = self._current_month_string() if summary.module_code == "inspection" else None
+            pending_task_count = len(
+                self._collect_pending_task_groups(module_code=summary.module_code, month=pending_month)
+            )
             for task in tasks:
                 latest_run = latest_runs_by_task_id.get(task.id)
                 if latest_run is None:
@@ -102,9 +119,14 @@ class OpsService:
             )
         return items
 
-    def list_pending_tasks(self, module_code: str | None = None, limit: int = 20) -> list[PendingTaskItem]:
+    def list_pending_tasks(
+        self,
+        module_code: str | None = None,
+        limit: int = 20,
+        month: str | None = None,
+    ) -> list[PendingTaskItem]:
         items: list[PendingTaskItem] = []
-        for group in self._collect_pending_task_groups(module_code=module_code):
+        for group in self._collect_pending_task_groups(module_code=module_code, month=month):
             task = group["task"]
             latest_run = group["latest_run"]
             record = group["record"]
@@ -136,6 +158,11 @@ class OpsService:
                     customer_name=customer_name,
                     delivery_id=normalized_data.get("delivery_id"),
                     visit_type=normalized_data.get("visit_type"),
+                    inspection_month=normalized_data.get("inspection_month"),
+                    executor_name=normalized_data.get("executor_name"),
+                    work_order_link=normalized_data.get("work_order_link"),
+                    work_order_closed=normalized_data.get("work_order_closed"),
+                    report_word_file=self._resolve_report_word_file(task, normalized_data),
                     planned_payload=task.planned_payload or {},
                     latest_run_status=latest_run.run_status if latest_run else None,
                     latest_run_status_label=latest_run_view["display_status"] if latest_run_view else None,
@@ -153,6 +180,16 @@ class OpsService:
             reverse=True,
         )
         return items[:limit]
+
+    def list_pending_inspection_months(self) -> list[str]:
+        months: set[str] = set()
+        for group in self._collect_pending_task_groups(module_code="inspection", month=None):
+            record = group["record"]
+            normalized_data = (getattr(record, "normalized_data", {}) or {}) if record else {}
+            month = normalized_data.get("inspection_month")
+            if isinstance(month, str) and month:
+                months.add(month)
+        return sorted(months, reverse=True)
 
     def list_recent_visit_links(self, limit: int | None = 10) -> list[RecentVisitLinkItem]:
         items: list[RecentVisitLinkItem] = []
@@ -176,6 +213,49 @@ class OpsService:
                 RecentVisitLinkItem(
                     customer_name=customer_name,
                     visit_type=visit_type,
+                    final_link=str(final_link),
+                    occurred_at=task_run.run_time,
+                    detail_url=f"/console/task-runs/{task_run.id}",
+                    task_plan_id=str(task_plan.id),
+                    task_run_id=str(task_run.id),
+                )
+            )
+            seen_links.add(str(final_link))
+            if limit is not None and len(items) >= limit:
+                break
+        return items
+
+    def list_recent_inspection_closures(
+        self,
+        *,
+        month: str | None = None,
+        limit: int | None = 10,
+    ) -> list[RecentInspectionClosureItem]:
+        items: list[RecentInspectionClosureItem] = []
+        seen_links: set[str] = set()
+        recent_limit = max((limit or 100) * 10, 50)
+        for task_run in self.task_run_repo.list_recent(limit=recent_limit):
+            if task_run.run_status != "success" or task_run.manual_required:
+                continue
+            task_plan = self.task_repo.get_by_id(task_run.task_plan_id)
+            if task_plan is None or task_plan.module_code != "inspection":
+                continue
+            record = self.record_repo.get_by_id(task_plan.normalized_record_id)
+            normalized_data = (getattr(record, "normalized_data", {}) or {}) if record else {}
+            inspection_month = normalized_data.get("inspection_month")
+            if month and inspection_month != month:
+                continue
+            final_link = (
+                (task_run.result_payload or {}).get("final_link")
+                or getattr(task_run, "final_link", None)
+                or normalized_data.get("work_order_link")
+            )
+            if not final_link or str(final_link) in seen_links:
+                continue
+            items.append(
+                RecentInspectionClosureItem(
+                    customer_name=self._resolve_customer_name(task_run.result_payload or {}, record),
+                    inspection_month=inspection_month,
                     final_link=str(final_link),
                     occurred_at=task_run.run_time,
                     detail_url=f"/console/task-runs/{task_run.id}",
@@ -319,6 +399,14 @@ class OpsService:
             or (getattr(record, "normalized_data", {}) or {}).get("customer_name")
         )
 
+    @staticmethod
+    def _is_effectively_completed_run(task, task_run) -> bool:
+        if task_run.manual_required:
+            return False
+        if task.module_code == "inspection":
+            return task_run.run_status == "success"
+        return task_run.run_status in {"success", "simulated_success"}
+
     def _latest_runs_by_task_ids(self, tasks) -> dict[object, object]:
         latest_runs_by_task_id: dict[object, object] = {}
         task_ids = [task.id for task in tasks]
@@ -326,7 +414,11 @@ class OpsService:
             latest_runs_by_task_id.setdefault(task_run.task_plan_id, task_run)
         return latest_runs_by_task_id
 
-    def _collect_pending_task_groups(self, module_code: str | None = None) -> list[dict[str, object]]:
+    def _collect_pending_task_groups(
+        self,
+        module_code: str | None = None,
+        month: str | None = None,
+    ) -> list[dict[str, object]]:
         tasks = self.task_repo.list_latest_by_business_key(module_code=module_code, status=None)
         latest_runs_by_task_id = self._latest_runs_by_task_ids(tasks)
         records_by_id = self.record_repo.get_by_ids([task.normalized_record_id for task in tasks])
@@ -352,17 +444,46 @@ class OpsService:
             task = group["task"]
             record = group["record"]
             source_row_id = getattr(record, "source_row_id", None) or str(task.normalized_record_id)
+            normalized_data = (getattr(record, "normalized_data", {}) or {}) if record else {}
             if task.plan_status != "planned":
                 continue
+            if month and task.module_code == "inspection":
+                if normalized_data.get("inspection_month") != month:
+                    continue
             if (task.module_code, source_row_id, task.task_type) in successful_keys:
                 continue
             all_runs = group["all_runs"]
-            if any(run.run_status in {"success", "simulated_success"} and not run.manual_required for run in all_runs):
+            if any(self._is_effectively_completed_run(task, run) for run in all_runs):
                 continue
             if any(run.manual_required for run in all_runs):
                 continue
             pending_groups.append(group)
         return pending_groups
+
+    def _resolve_report_word_file(self, task, normalized_data: dict) -> str | None:
+        payload = task.planned_payload or {}
+        report_match = payload.get("report_match") or {}
+        matched_files = report_match.get("matched_files") if isinstance(report_match, dict) else None
+        if isinstance(matched_files, dict):
+            word_files = matched_files.get("word")
+            if isinstance(word_files, list) and word_files:
+                return str(word_files[0])
+        word_files = payload.get("word_files")
+        if isinstance(word_files, list) and word_files:
+            return str(word_files[0])
+        if task.module_code == "inspection":
+            match_result = self.inspection_report_matcher.match(
+                str(normalized_data.get("customer_name") or ""),
+                self.inspection_report_scanner.scan(),
+            )
+            word_files = match_result.matched_files.get("word") if match_result.matched else None
+            if isinstance(word_files, list) and word_files:
+                return str(word_files[0])
+        return None
+
+    @staticmethod
+    def _current_month_string() -> str:
+        return datetime.now().strftime("%Y-%m")
 
     @staticmethod
     def _is_newer_task(task, current_task) -> bool:

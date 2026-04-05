@@ -73,11 +73,69 @@
         >
           重跑同步
         </button>
+        <a class="module-entry-link" href="/console/modules/{{ item.module_code }}">进入模块</a>
         <a href="/console/snapshots?module_code={{ item.module_code }}">查看快照</a>
         <a href="/console/tasks?module_code={{ item.module_code }}">查看任务</a>
       </div>
     </article>
     {% endfor %}
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h4>巡检工单当月待闭环</h4>
+        <p>默认按月份查看执行人是舒磊、巡检已完成、且工单尚未闭环的巡检任务，只上传 Word 报告。</p>
+      </div>
+      <div class="inline-actions">
+        <form class="inline-form" method="get" action="/console">
+          <label for="inspection-month" class="muted">月份</label>
+          <select id="inspection-month" name="inspection_month" onchange="this.form.submit()">
+            {% for month_value in available_inspection_months %}
+            <option value="{{ month_value }}" {% if month_value == inspection_month %}selected{% endif %}>{{ month_value }}</option>
+            {% endfor %}
+          </select>
+        </form>
+        <button class="action-button danger" data-action="execute-all-inspection" data-total-count="{{ pending_inspection_items | length }}" data-month="{{ inspection_month }}" {% if not pending_inspection_items %}disabled{% endif %}>
+          一键上传报告并闭环全部（{{ pending_inspection_items | length }}）
+        </button>
+      </div>
+    </div>
+    {% if pending_inspection_items %}
+    <table class="data-table compact-table">
+      <thead>
+        <tr>
+          <th>月份</th>
+          <th>客户名称</th>
+          <th>执行人</th>
+          <th>巡检工单</th>
+          <th>Word 报告</th>
+          <th>最近执行</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in pending_inspection_items %}
+        <tr>
+          <td>{{ item.inspection_month or inspection_month }}</td>
+          <td>{{ item.customer_name or '未知客户' }}</td>
+          <td>{{ item.executor_name or '未识别' }}</td>
+          <td>{% if item.work_order_link %}<a href="{{ item.work_order_link }}" target="_blank" rel="noreferrer">工单链接</a>{% else %}无{% endif %}</td>
+          <td>{{ item.report_word_file or '未匹配到 Word 报告' }}</td>
+          <td>{{ item.latest_run_time | fmt_dt if item.latest_run_time else '未执行' }}</td>
+          <td>
+            <a href="{{ item.detail_url }}">查看任务</a>
+            <button class="action-button danger" data-action="execute" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">上传报告并闭环</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">{{ inspection_month }} 当前没有待闭环巡检任务。</p>
+    {% endif %}
   </div>
 </section>
 

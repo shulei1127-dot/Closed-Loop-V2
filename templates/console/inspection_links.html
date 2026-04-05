@@ -1,0 +1,43 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h3>{{ inspection_month }} 全部巡检闭环记录</h3>
+        <p>这里汇总当月最近成功闭环的巡检工单，方便统一复核和复制工单链接。</p>
+      </div>
+      <div class="topbar-actions">
+        <a href="/console/modules/inspection?inspection_month={{ inspection_month }}">返回巡检模块</a>
+      </div>
+    </div>
+    {% if inspection_link_items %}
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>月份</th>
+          <th>客户名称</th>
+          <th>闭环时间</th>
+          <th>巡检工单链接</th>
+          <th>执行记录</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in inspection_link_items %}
+        <tr>
+          <td>{{ item.inspection_month or inspection_month }}</td>
+          <td>{{ item.customer_name or '未知客户' }}</td>
+          <td>{{ item.occurred_at | fmt_dt }}</td>
+          <td><a href="{{ item.final_link }}" target="_blank" rel="noreferrer">{{ item.final_link }}</a></td>
+          <td>{% if item.detail_url %}<a href="{{ item.detail_url }}">查看执行记录</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">{{ inspection_month }} 当前还没有成功闭环的巡检工单记录。</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

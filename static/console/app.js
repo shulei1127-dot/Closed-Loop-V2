@@ -72,6 +72,18 @@ async function handleExecuteAllVisit(button) {
   scheduleRefresh(1800);
 }
 
+async function handleExecuteAllInspection(button) {
+  const totalCount = Number.parseInt(button.dataset.totalCount || "0", 10);
+  const month = button.dataset.month || "";
+  if (!window.confirm(`将按顺序上传 Word 报告并闭环 ${month || "当前筛选"} 的全部巡检任务（当前 ${totalCount} 条）。是否继续？`)) {
+    return;
+  }
+  renderFeedback("warning", "正在批量上传报告并闭环巡检任务...", { module_code: "inspection", total_count: totalCount, month });
+  const result = await postJson("/api/tasks/batch/execute-pending", { module_code: "inspection", month, dry_run: false });
+  renderFeedback("success", "巡检批量执行完成", result);
+  scheduleRefresh(2200);
+}
+
 async function handleTaskRerun(button) {
   const taskId = button.dataset.taskId;
   const dryRun = button.dataset.dryRun === "true";
@@ -133,6 +145,10 @@ document.addEventListener("click", async (event) => {
     }
     if (button.dataset.action === "execute-all-visit") {
       await handleExecuteAllVisit(button);
+      return;
+    }
+    if (button.dataset.action === "execute-all-inspection") {
+      await handleExecuteAllInspection(button);
       return;
     }
     if (button.dataset.action === "rerun-task") {

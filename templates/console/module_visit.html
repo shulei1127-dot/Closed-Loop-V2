@@ -1,0 +1,129 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<section class="section">
+  <div class="panel module-page-hero">
+    <div>
+      <p class="eyebrow">Visit Module</p>
+      <h3>交付转售后回访</h3>
+      <p class="muted">这里集中看需要创建并闭环的回访任务，以及最近已经成功闭环的回访链接。</p>
+    </div>
+    <div class="inline-actions">
+      <button
+        class="action-button"
+        data-action="sync"
+        data-module-code="visit"
+      >
+        立即同步
+      </button>
+      <button
+        class="action-button secondary"
+        data-action="rerun-sync"
+        data-module-code="visit"
+      >
+        重跑同步
+      </button>
+      <a class="module-entry-link" href="/console">返回模块总览</a>
+      <a class="module-entry-link" href="/console/tasks?module_code=visit">查看全部 visit 任务</a>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <h4>模块状态</h4>
+      <span class="badge status-{{ module_summary.latest_sync_status or 'unknown' }}">{{ module_summary.latest_sync_status_label or '未同步' }}</span>
+    </div>
+    <dl class="stats">
+      <div><dt>最近同步</dt><dd>{{ module_summary.latest_snapshot_time | fmt_dt }}</dd></div>
+      <div><dt>最近执行</dt><dd>{{ module_summary.latest_execute_status_label or '暂无' }}</dd></div>
+      <div><dt>待执行</dt><dd>{{ module_summary.planned_tasks }}</dd></div>
+      <div><dt>记录数</dt><dd>{{ module_summary.row_count }}</dd></div>
+      <div><dt>失败任务</dt><dd>{{ module_summary.failed_task_count }}</dd></div>
+      <div><dt>需人工处理</dt><dd>{{ module_summary.manual_required_count }}</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h4>待执行回访任务</h4>
+        <p class="muted">这里只展示当前真的还需要处理的交付转售后回访任务。</p>
+      </div>
+      <button class="action-button danger" data-action="execute-all-visit" data-total-count="{{ pending_visit_items | length }}" {% if not pending_visit_items %}disabled{% endif %}>
+        一键创建并闭环全部（{{ pending_visit_items | length }}）
+      </button>
+    </div>
+    {% if pending_visit_items %}
+    <table class="data-table compact-table">
+      <thead>
+        <tr>
+          <th>客户名称</th>
+          <th>回访类型</th>
+          <th>Delivery ID</th>
+          <th>最近执行</th>
+          <th>状态说明</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in pending_visit_items %}
+        <tr>
+          <td>{{ item.customer_name or '未知客户' }}</td>
+          <td>{{ item.visit_type or item.task_type }}</td>
+          <td>{{ item.delivery_id or '缺失' }}</td>
+          <td>{{ item.latest_run_time | fmt_dt if item.latest_run_time else '未执行' }}</td>
+          <td>{{ item.business_explanation }}</td>
+          <td>
+            <a href="{{ item.detail_url }}">查看任务</a>
+            <button class="action-button danger" data-action="execute" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">一键创建并闭环</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">当前没有待执行回访任务。</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h4>最近闭环回访链接</h4>
+        <p class="muted">闭环成功后，可以直接在这里复制回访链接。</p>
+      </div>
+      <a class="module-entry-link" href="/console/visit-links">查看全部闭环回访链接</a>
+    </div>
+    {% if recent_visit_links %}
+    <table class="data-table compact-table">
+      <thead>
+        <tr>
+          <th>客户名称</th>
+          <th>回访类型</th>
+          <th>闭环时间</th>
+          <th>回访链接</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in recent_visit_links %}
+        <tr>
+          <td>{{ item.customer_name or '未知客户' }}</td>
+          <td>{{ item.visit_type or '未知类型' }}</td>
+          <td>{{ item.occurred_at | fmt_dt }}</td>
+          <td><a href="{{ item.final_link }}" target="_blank" rel="noreferrer">{{ item.final_link }}</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">当前还没有成功闭环的回访链接。</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

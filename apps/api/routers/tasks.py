@@ -108,7 +108,7 @@ async def execute_pending_tasks(
     service: TaskExecutionService = Depends(get_task_execution_service),
 ) -> TaskBatchExecuteResponse:
     ops_service = OpsService(db)
-    pending_items = ops_service.list_pending_tasks(module_code=request.module_code, limit=5000)
+    pending_items = ops_service.list_pending_tasks(module_code=request.module_code, limit=5000, month=request.month)
     task_ids = [uuid.UUID(item.task_plan_id) for item in pending_items]
 
     results = []

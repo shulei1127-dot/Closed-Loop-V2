@@ -5,6 +5,7 @@ import json
 import subprocess
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from core.config import Settings, get_settings
 from services.collectors.dingtalk_parallelv2_decoder import (
@@ -234,6 +235,15 @@ class _ChromeDingtalkSession:
                 active_url = ""
             if isinstance(active_url, str) and active_url.startswith(normalized_target):
                 return
+        doc_key, sheet_id, view_id = _extract_dingtalk_document_fingerprint(normalized_target)
+        match_checks: list[str] = []
+        if doc_key:
+            match_checks.append(f'currentUrl contains {json.dumps(f"docKey={doc_key}")}')
+        if sheet_id:
+            match_checks.append(f'currentUrl contains {json.dumps(f"sheetId={sheet_id}")}')
+        if view_id:
+            match_checks.append(f'currentUrl contains {json.dumps(f"viewId={view_id}")}')
+        match_condition = " and ".join(match_checks) if match_checks else f'currentUrl starts with targetUrl'
         await self._run_applescript(
             f'''
             tell application "Google Chrome"
@@ -246,7 +256,7 @@ class _ChromeDingtalkSession:
                 tell window windowIndex
                   repeat with tabIndex from 1 to count of tabs
                     set currentUrl to URL of tab tabIndex
-                    if currentUrl starts with targetUrl then
+                    if {match_condition} then
                       set matchedWindowIndex to windowIndex
                       set matchedTabIndex to tabIndex
                       exit repeat
@@ -701,3 +711,12 @@ async def _shared_chrome_dingtalk_session():
             yield session
         finally:
             await session.__aexit__(None, None, None)
+
+
+def _extract_dingtalk_document_fingerprint(target_url: str) -> tuple[str | None, str | None, str | None]:
+    parsed = urlparse(target_url)
+    query = parse_qs(parsed.query)
+    doc_key = query.get("docKey", [None])[0]
+    sheet_id = query.get("sheetId", [None])[0]
+    view_id = query.get("viewId", [None])[0]
+    return doc_key, sheet_id, view_id

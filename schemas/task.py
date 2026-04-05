@@ -24,6 +24,7 @@ class TaskRunResponse(BaseModel):
 
 class TaskBatchExecuteRequest(BaseModel):
     module_code: str
+    month: str | None = None
     dry_run: bool = False
 
 

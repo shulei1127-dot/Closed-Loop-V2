@@ -77,9 +77,48 @@ def test_multiple_candidates_require_manual(tmp_path: Path) -> None:
     assert "word" in (result.error_message or "")
 
 
+def test_prefixed_word_filename_still_matches_customer(tmp_path: Path) -> None:
+    _write_file(tmp_path / "牧云-运行状态巡检-昆明电力交易中心有限责任公司-20260325.docx")
+
+    files = InspectionReportScanner(tmp_path).scan()
+    result = InspectionReportMatcher(required_file_types=("word",)).match("昆明电力交易中心有限责任公司", files)
+
+    assert result.matched is True
+    assert result.manual_required is False
+    assert result.matched_files["word"]
+
+
+def test_long_customer_name_matches_truncated_candidate_via_bidirectional_fuzzy(tmp_path: Path) -> None:
+    _write_file(tmp_path / "国网冀北电力有限公司电力科学研究院墨攻巡检报告.docx")
+
+    files = InspectionReportScanner(tmp_path).scan()
+    result = InspectionReportMatcher(required_file_types=("word",)).match(
+        "国网冀北电力有限公司电力科学研究院",
+        files,
+    )
+
+    assert result.matched is True
+    assert result.manual_required is False
+    assert result.matched_files["word"][0].endswith("国网冀北电力有限公司电力科学研究院墨攻巡检报告.docx")
+
+
+def test_duplicate_copy_suffix_does_not_require_manual(tmp_path: Path) -> None:
+    _write_file(tmp_path / "国网冀北电力有限公司电力科学研究院墨攻巡检报告.docx")
+    _write_file(tmp_path / "国网冀北电力有限公司电力科学研究院墨攻巡检报告(1).docx")
+
+    files = InspectionReportScanner(tmp_path).scan()
+    result = InspectionReportMatcher(required_file_types=("word",)).match(
+        "国网冀北电力有限公司电力科学研究院",
+        files,
+    )
+
+    assert result.matched is True
+    assert result.manual_required is False
+    assert len(result.matched_files["word"]) == 1
+
+
 def test_inspection_planner_and_executor_linkage(tmp_path: Path, monkeypatch) -> None:
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
-    _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.pdf")
     monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
     get_settings.cache_clear()
 
@@ -90,8 +129,12 @@ def test_inspection_planner_and_executor_linkage(tmp_path: Path, monkeypatch) ->
                 "source_row_id": "inspection-001",
                 "recognition_status": "full",
                 "normalized_data": {
+                    "inspection_month": "2026-03",
                     "customer_name": "南京真实客户",
+                    "service_type": "巡检服务",
+                    "executor_name": "舒磊",
                     "inspection_done": True,
+                    "work_order_closed": False,
                     "work_order_link": "https://wo.example.com/1",
                     "work_order_id": "WO-001",
                     "report_match_name": "南京真实客户-巡检报告",
@@ -113,8 +156,12 @@ def test_inspection_planner_and_executor_linkage(tmp_path: Path, monkeypatch) ->
         recognition_status="full",
         planned_payload=tasks[0].planned_payload,
         normalized_data={
+            "inspection_month": "2026-03",
             "customer_name": "南京真实客户",
+            "service_type": "巡检服务",
+            "executor_name": "舒磊",
             "inspection_done": True,
+            "work_order_closed": False,
             "work_order_link": "https://wo.example.com/1",
             "work_order_id": "WO-001",
         },

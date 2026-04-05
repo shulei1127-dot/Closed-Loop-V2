@@ -9,6 +9,10 @@ from services.planners.inspection_planner import InspectionPlanner
 from services.planners.proactive_planner import ProactivePlanner
 from services.planners.visit_planner import VisitPlanner
 from services.recognizers.inspection_recognizer import InspectionRecognizer
+from services.recognizers.inspection_work_order_backfill import (
+    InspectionWorkOrderStageBackfill,
+    extract_inspection_stage_from_text,
+)
 from services.recognizers.proactive_recognizer import ProactiveRecognizer
 from services.recognizers.visit_recognizer import VisitRecognizer
 
@@ -96,25 +100,77 @@ def test_visit_recognizer_maps_pts_selected_satisfaction() -> None:
 
 def test_inspection_real_rows_field_recognition() -> None:
     recognizer = InspectionRecognizer()
-    raw_columns = ["企业名称", "任务链接", "工单号", "完成状态", "报告名称"]
+    raw_columns = ["启动月份", "企业名称", "增值服务类型1", "执行人", "任务链接", "工单号", "完成状态", "工单是否闭环", "报告名称", "备注"]
     raw_rows = [
         {
             "row_id": "inspection-alias-001",
+            "启动月份": '{"3": 1772323200000, "5": 1772323200000, "6": "month"}',
             "企业名称": "南京别名客户",
+            "增值服务类型1": "巡检服务",
+            "执行人": '[{"id":"2747525037","name":"舒磊","realName":"舒磊","data-type":"mention"}]',
             "任务链接": "https://wo.example.com/alias-001",
             "工单号": "WO-ALIAS-001",
             "完成状态": "完成",
+            "工单是否闭环": "否",
             "报告名称": "南京别名客户-巡检报告",
+            "备注": "巡检备注测试",
         }
     ]
 
     result = recognizer.recognize(raw_columns, raw_rows)
+    normalized = result.normalized_records[0]["normalized_data"]
 
     assert result.field_mapping["customer_name"] == "企业名称"
     assert result.field_mapping["inspection_done"] == "完成状态"
-    assert result.normalized_records[0]["normalized_data"]["inspection_done"] is True
-    assert result.normalized_records[0]["normalized_data"]["work_order_id"] == "WO-ALIAS-001"
+    assert result.field_mapping["inspection_month"] == "启动月份"
+    assert result.field_mapping["executor_name"] == "执行人"
+    assert normalized["inspection_month"] == "2026-03"
+    assert normalized["service_type"] == "巡检服务"
+    assert normalized["executor_name"] == "舒磊"
+    assert normalized["inspection_done"] is True
+    assert normalized["work_order_id"] == "WO-ALIAS-001"
+    assert normalized["work_order_closed"] is False
+    assert normalized["remark"] == "巡检备注测试"
     assert result.recognition_status == "full"
+
+
+def test_extract_inspection_stage_from_text_prefers_review_completion() -> None:
+    stage, raw = extract_inspection_stage_from_text(
+        "开始处理工单 舒磊 完成工单处理 舒磊 完成工单审核 李升明"
+    )
+    assert stage == "审核工单"
+    assert raw == "完成工单审核"
+
+
+def test_inspection_work_order_backfill_marks_review_stage_closed() -> None:
+    async def fake_stage_reader(link: str) -> tuple[str | None, str, str | None]:
+        assert link == "https://pts.example.com/project/order/1"
+        return "审核工单", "pts_browser_session", "完成工单审核"
+
+    enricher = InspectionWorkOrderStageBackfill(stage_reader=fake_stage_reader)
+    records = [
+        {
+            "source_row_id": "inspection-stage-001",
+            "recognition_status": "full",
+            "normalized_data": {
+                "customer_name": "昆明客户",
+                "service_type": "巡检服务",
+                "executor_name": "舒磊",
+                "inspection_done": True,
+                "work_order_closed": False,
+                "work_order_link": "https://pts.example.com/project/order/1",
+            },
+        }
+    ]
+
+    enriched = asyncio.run(enricher.enrich_records(records))
+    normalized = enriched[0]["normalized_data"]
+
+    assert normalized["work_order_stage"] == "审核工单"
+    assert normalized["work_order_closed"] is True
+    assert normalized["debug_work_order_stage_source"] == "pts_browser_session"
+    assert normalized["debug_work_order_stage_raw"] == "完成工单审核"
+    assert normalized["debug_work_order_stage_normalized"] == "审核工单"
 
 
 def test_proactive_real_rows_field_recognition() -> None:

@@ -1,0 +1,90 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<section class="section">
+  <div class="panel module-page-hero">
+    <div>
+      <p class="eyebrow">Proactive Module</p>
+      <h3>超半年主动回访</h3>
+      <p class="muted">这里集中看主动回访模块当前需要处理的任务，不再和其他模块混在总览里。</p>
+    </div>
+    <div class="inline-actions">
+      <button
+        class="action-button"
+        data-action="sync"
+        data-module-code="proactive"
+      >
+        立即同步
+      </button>
+      <button
+        class="action-button secondary"
+        data-action="rerun-sync"
+        data-module-code="proactive"
+      >
+        重跑同步
+      </button>
+      <a class="module-entry-link" href="/console">返回模块总览</a>
+      <a class="module-entry-link" href="/console/tasks?module_code=proactive">查看全部 proactive 任务</a>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <h4>模块状态</h4>
+      <span class="badge status-{{ module_summary.latest_sync_status or 'unknown' }}">{{ module_summary.latest_sync_status_label or '未同步' }}</span>
+    </div>
+    <dl class="stats">
+      <div><dt>最近同步</dt><dd>{{ module_summary.latest_snapshot_time | fmt_dt }}</dd></div>
+      <div><dt>最近执行</dt><dd>{{ module_summary.latest_execute_status_label or '暂无' }}</dd></div>
+      <div><dt>待执行</dt><dd>{{ module_summary.planned_tasks }}</dd></div>
+      <div><dt>记录数</dt><dd>{{ module_summary.row_count }}</dd></div>
+      <div><dt>失败任务</dt><dd>{{ module_summary.failed_task_count }}</dd></div>
+      <div><dt>需人工处理</dt><dd>{{ module_summary.manual_required_count }}</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h4>待处理主动回访任务</h4>
+        <p class="muted">这里只展示当前仍需要处理的主动回访任务。</p>
+      </div>
+      <a class="module-entry-link" href="/console/tasks?module_code=proactive&status=all">查看全量 planner 结果</a>
+    </div>
+    {% if pending_proactive_items %}
+    <table class="data-table compact-table">
+      <thead>
+        <tr>
+          <th>客户名称</th>
+          <th>任务类型</th>
+          <th>最近执行</th>
+          <th>状态说明</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in pending_proactive_items %}
+        <tr>
+          <td>{{ item.customer_name or '未知客户' }}</td>
+          <td>{{ item.task_type }}</td>
+          <td>{{ item.latest_run_time | fmt_dt if item.latest_run_time else '未执行' }}</td>
+          <td>{{ item.business_explanation }}</td>
+          <td>
+            <a href="{{ item.detail_url }}">查看任务</a>
+            <button class="action-button secondary" data-action="precheck" data-task-id="{{ item.task_plan_id }}">预检查</button>
+            <button class="action-button danger" data-action="execute" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">执行</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">当前没有待处理主动回访任务。</p>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

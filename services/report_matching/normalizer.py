@@ -10,6 +10,12 @@ from services.report_matching.schemas import ReportMatchingRules
 DEFAULT_RULES = ReportMatchingRules(
     noise_words=(
         "巡检报告",
+        "运行状态巡检",
+        "运行状态",
+        "巡检",
+        "谛听",
+        "墨攻",
+        "牧云",
         "雷池",
         "已审核",
         "最终版",
@@ -24,6 +30,7 @@ DEFAULT_RULES = ReportMatchingRules(
         r"[-_ ]?v\d+$",
         r"[-_ ]?版本\d+$",
         r"[-_ ]?第\d+季度$",
+        r"\(\d+\)$",
     ),
     extension_whitelist=(".doc", ".docx", ".pdf"),
     temp_file_prefixes=("~$", ".~", "."),
@@ -92,3 +99,10 @@ def is_temporary_file(filename: str, rules: ReportMatchingRules = DEFAULT_RULES)
 
 def file_type_for(filename: str) -> str | None:
     return FILE_TYPE_MAP.get(Path(filename).suffix.lower())
+
+
+def canonicalize_filename(filename: str) -> str:
+    path = Path(filename)
+    stem = unicodedata.normalize("NFKC", path.stem)
+    stem = re.sub(r"\(\d+\)$", "", stem).strip()
+    return f"{stem}{path.suffix.lower()}"
