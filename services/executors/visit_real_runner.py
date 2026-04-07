@@ -356,7 +356,8 @@ class VisitRealRunner:
         else:
             if not self.settings.pts_base_url:
                 missing_fields.append("pts_base_url")
-            if not self._browser_session_available() and not self.settings.pts_cookie_header:
+            # visit 主链 phase-1 默认 direct 优先，要求 Cookie 会话可用。
+            if not self.settings.pts_cookie_header:
                 missing_fields.append("pts_cookie_header")
         apply_validation_result(diagnostics, missing_fields)
         if missing_fields:
@@ -373,17 +374,35 @@ class VisitRealRunner:
                 runner_diagnostics=diagnostics,
             )
 
-        if self._use_legacy_api_mode():
+        if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode:
             return await self._run_legacy_api_mode(context, actions, diagnostics)
-        if self._browser_session_available():
-            return await self._run_pts_browser_mode(context, actions, diagnostics)
-        return await self._run_pts_direct_mode(context, actions, diagnostics)
+
+        direct_outcome = await self._run_pts_direct_mode(context, actions, diagnostics)
+        if direct_outcome.run_status in {"success", "pending_confirmation"}:
+            return direct_outcome
+        if not self.settings.visit_browser_fallback_enabled:
+            return direct_outcome
+        if not self._browser_session_available():
+            return direct_outcome
+        if not self._can_fallback_from_direct(direct_outcome):
+            return direct_outcome
+
+        fallback_diagnostics = self._base_diagnostics()
+        fallback_diagnostics["fallback_from"] = "pts_direct"
+        fallback_diagnostics["transport_mode"] = "pts_browser_session"
+        fallback_diagnostics["fallback_reason"] = (direct_outcome.runner_diagnostics or {}).get("error_type")
+        return await self._run_pts_browser_mode(context, actions, fallback_diagnostics)
 
     def _use_legacy_api_mode(self) -> bool:
         return bool(self.settings.visit_real_base_url and self.settings.visit_real_token)
 
     def _browser_session_available(self) -> bool:
         return _find_local_chrome_user_data_dir() is not None
+
+    @staticmethod
+    def _can_fallback_from_direct(outcome: VisitRealRunOutcome) -> bool:
+        error_type = str((outcome.runner_diagnostics or {}).get("error_type") or "").strip()
+        return error_type in {"timeout", "http_error", "session_expired", "response_invalid", "unknown_error"}
 
     async def _run_pts_direct_mode(
         self,
@@ -484,17 +503,36 @@ class VisitRealRunner:
                         fallback_message="完成回访失败",
                     )
 
+                postcheck_result = normalize_action_result(
+                    await self._postcheck_visit_closure(
+                        query_func=lambda query: self._pts_graphql(client, query),
+                        context=context,
+                        runtime=runtime,
+                    )
+                )
+                action_results.append(postcheck_result)
+                diagnostics["postcheck"] = self._extract_visit_postcheck_summary(postcheck_result)
+                if postcheck_result["status"] == "failed":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=postcheck_result,
+                        fallback_message="回访工单 post-check 未通过",
+                        final_link=runtime.final_link,
+                    )
+                if postcheck_result["status"] == "pending_confirmation":
+                    return self._pending_confirmation_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=postcheck_result,
+                        fallback_message="回访工单状态暂时无法确认，请稍后同步确认",
+                        final_link=runtime.final_link,
+                    )
+
                 writeback_result = await self._run_writeback(context, runtime.final_link)
                 if writeback_result is not None:
                     action_results.append(normalize_action_result(writeback_result))
-                    if writeback_result["status"] != "success":
-                        return self._failure_outcome(
-                            diagnostics=diagnostics,
-                            action_results=action_results,
-                            action_result=writeback_result,
-                            fallback_message="回写钉钉文档失败",
-                            final_link=runtime.final_link,
-                        )
+                    diagnostics["writeback"] = {"enabled": True, "status": writeback_result.get("status")}
 
                 action_results = refresh_runner_diagnostics(diagnostics, action_results)
                 mark_runner_success(diagnostics)
@@ -617,17 +655,36 @@ class VisitRealRunner:
                         fallback_message="完成回访失败",
                     )
 
+                postcheck_result = normalize_action_result(
+                    await self._postcheck_visit_closure(
+                        query_func=browser.graphql,
+                        context=context,
+                        runtime=runtime,
+                    )
+                )
+                action_results.append(postcheck_result)
+                diagnostics["postcheck"] = self._extract_visit_postcheck_summary(postcheck_result)
+                if postcheck_result["status"] == "failed":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=postcheck_result,
+                        fallback_message="回访工单 post-check 未通过",
+                        final_link=runtime.final_link,
+                    )
+                if postcheck_result["status"] == "pending_confirmation":
+                    return self._pending_confirmation_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=postcheck_result,
+                        fallback_message="回访工单状态暂时无法确认，请稍后同步确认",
+                        final_link=runtime.final_link,
+                    )
+
                 writeback_result = await self._run_writeback(context, runtime.final_link)
                 if writeback_result is not None:
                     action_results.append(normalize_action_result(writeback_result))
-                    if writeback_result["status"] != "success":
-                        return self._failure_outcome(
-                            diagnostics=diagnostics,
-                            action_results=action_results,
-                            action_result=writeback_result,
-                            fallback_message="回写钉钉文档失败",
-                            final_link=runtime.final_link,
-                        )
+                    diagnostics["writeback"] = {"enabled": True, "status": writeback_result.get("status")}
 
                 action_results = refresh_runner_diagnostics(diagnostics, action_results)
                 mark_runner_success(diagnostics)
@@ -735,26 +792,21 @@ class VisitRealRunner:
                         fallback_message="完成回访失败",
                     )
 
+                postcheck_result = normalize_action_result(self._legacy_postcheck_pending())
+                action_results.append(postcheck_result)
+                diagnostics["postcheck"] = self._extract_visit_postcheck_summary(postcheck_result)
+
                 writeback_result = await self._run_writeback(context, final_link)
                 if writeback_result is not None:
                     action_results.append(normalize_action_result(writeback_result))
-                    if writeback_result["status"] != "success":
-                        return self._failure_outcome(
-                            diagnostics=diagnostics,
-                            action_results=action_results,
-                            action_result=writeback_result,
-                            fallback_message="回写钉钉文档失败",
-                            final_link=final_link,
-                        )
+                    diagnostics["writeback"] = {"enabled": True, "status": writeback_result.get("status")}
 
-                action_results = refresh_runner_diagnostics(diagnostics, action_results)
-                mark_runner_success(diagnostics)
-                return VisitRealRunOutcome(
-                    run_status="success",
-                    final_link=final_link,
-                    retryable=False,
+                return self._pending_confirmation_outcome(
+                    diagnostics=diagnostics,
                     action_results=action_results,
-                    runner_diagnostics=diagnostics,
+                    action_result=postcheck_result,
+                    fallback_message="legacy 模式暂不提供 visit post-check，请稍后同步确认",
+                    final_link=final_link,
                 )
         except httpx.TimeoutException as exc:
             action_results = refresh_runner_diagnostics(diagnostics, action_results)
@@ -1365,8 +1417,11 @@ class VisitRealRunner:
         }
 
     def _base_diagnostics(self) -> dict[str, Any]:
-        if self._use_legacy_api_mode():
+        if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode:
             transport_mode = "legacy_api"
+            pts_auth_header = "Cookie"
+        elif self.settings.visit_prefer_direct_mode:
+            transport_mode = "pts_direct"
             pts_auth_header = "Cookie"
         elif self._browser_session_available():
             transport_mode = "pts_browser_session"
@@ -1383,24 +1438,268 @@ class VisitRealRunner:
             pts_verify_ssl=self.settings.pts_verify_ssl,
             pts_auth_header=pts_auth_header,
             base_url=self.settings.visit_real_base_url or self.settings.pts_base_url,
-            create_endpoint=self.settings.visit_real_create_endpoint if self._use_legacy_api_mode() else "/query:create_visit",
-            assign_endpoint_template=self.settings.visit_real_assign_endpoint_template if self._use_legacy_api_mode() else "create_visit.visitor_id",
-            mark_target_endpoint_template=self.settings.visit_real_mark_target_endpoint_template if self._use_legacy_api_mode() else "create_visit.contact_list",
-            fill_feedback_endpoint_template=self.settings.visit_real_fill_feedback_endpoint_template if self._use_legacy_api_mode() else "/query:process_visit",
-            complete_endpoint_template=self.settings.visit_real_complete_endpoint_template if self._use_legacy_api_mode() else "/query:finish_visit",
-            token_header=self.settings.visit_real_token_header if self._use_legacy_api_mode() else None,
+            create_endpoint=(
+                self.settings.visit_real_create_endpoint
+                if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode
+                else "/query:create_visit"
+            ),
+            assign_endpoint_template=(
+                self.settings.visit_real_assign_endpoint_template
+                if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode
+                else "create_visit.visitor_id"
+            ),
+            mark_target_endpoint_template=(
+                self.settings.visit_real_mark_target_endpoint_template
+                if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode
+                else "create_visit.contact_list"
+            ),
+            fill_feedback_endpoint_template=(
+                self.settings.visit_real_fill_feedback_endpoint_template
+                if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode
+                else "/query:process_visit"
+            ),
+            complete_endpoint_template=(
+                self.settings.visit_real_complete_endpoint_template
+                if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode
+                else "/query:finish_visit"
+            ),
+            token_header=(
+                self.settings.visit_real_token_header
+                if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode
+                else None
+            ),
         )
+
+    async def _postcheck_visit_closure(
+        self,
+        *,
+        query_func,
+        context: ExecutorContext,
+        runtime: _PtsVisitRuntime,
+    ) -> dict[str, Any]:
+        expected_delivery_id = str(context.normalized_data.get("delivery_id") or "").strip()
+        if not runtime.visit_id:
+            return {
+                "action": "postcheck_visit_closure",
+                "status": "failed",
+                "error_type": "postcheck_failed",
+                "error_message": "缺少 visit_id，无法执行 post-check",
+                "retryable": False,
+                "postcheck_passed": False,
+                "closure_confirmed": False,
+                "delivery_bound_confirmed": False,
+                "feedback_confirmed": False,
+                "postcheck_finished": None,
+                "postcheck_delivery_ids_found": [],
+                "postcheck_feedback_present": False,
+                "postcheck_checked_at": _utc_now_z(),
+            }
+
+        try:
+            detail = await query_func(_build_visit_detail_query(runtime.visit_id))
+        except _PtsRunnerError as exc:
+            return {
+                "action": "postcheck_visit_closure",
+                "status": "pending_confirmation",
+                "error_type": exc.error_type,
+                "error_message": f"post-check 暂时无法确认: {exc.error_message}",
+                "retryable": True,
+                "postcheck_passed": False,
+                "closure_confirmed": False,
+                "delivery_bound_confirmed": False,
+                "feedback_confirmed": False,
+                "postcheck_finished": None,
+                "postcheck_delivery_ids_found": [],
+                "postcheck_feedback_present": False,
+                "postcheck_checked_at": _utc_now_z(),
+            }
+        except Exception as exc:
+            return {
+                "action": "postcheck_visit_closure",
+                "status": "pending_confirmation",
+                "error_type": "response_invalid",
+                "error_message": f"post-check 返回异常: {exc}",
+                "retryable": True,
+                "postcheck_passed": False,
+                "closure_confirmed": False,
+                "delivery_bound_confirmed": False,
+                "feedback_confirmed": False,
+                "postcheck_finished": None,
+                "postcheck_delivery_ids_found": [],
+                "postcheck_feedback_present": False,
+                "postcheck_checked_at": _utc_now_z(),
+            }
+
+        visit_detail = detail.get("visit_detail") or {}
+        finished = bool(visit_detail.get("finished"))
+        delivery_ids_found = self._extract_delivery_ids_from_visit_detail(visit_detail)
+        delivery_bound_confirmed = bool(expected_delivery_id and expected_delivery_id in delivery_ids_found)
+        feedback_confirmed = self._visit_feedback_present(visit_detail)
+
+        if not finished:
+            return {
+                "action": "postcheck_visit_closure",
+                "status": "failed",
+                "error_type": "postcheck_failed",
+                "error_message": "post-check 未通过：visit.finished=false",
+                "retryable": False,
+                "postcheck_passed": False,
+                "closure_confirmed": False,
+                "delivery_bound_confirmed": delivery_bound_confirmed,
+                "feedback_confirmed": feedback_confirmed,
+                "postcheck_finished": finished,
+                "postcheck_delivery_ids_found": delivery_ids_found,
+                "postcheck_feedback_present": feedback_confirmed,
+                "postcheck_checked_at": _utc_now_z(),
+            }
+        if not delivery_bound_confirmed:
+            return {
+                "action": "postcheck_visit_closure",
+                "status": "failed",
+                "error_type": "postcheck_failed",
+                "error_message": "post-check 未通过：delivery_id 不匹配",
+                "retryable": False,
+                "postcheck_passed": False,
+                "closure_confirmed": True,
+                "delivery_bound_confirmed": False,
+                "feedback_confirmed": feedback_confirmed,
+                "postcheck_finished": finished,
+                "postcheck_delivery_ids_found": delivery_ids_found,
+                "postcheck_feedback_present": feedback_confirmed,
+                "postcheck_checked_at": _utc_now_z(),
+            }
+        if not feedback_confirmed:
+            return {
+                "action": "postcheck_visit_closure",
+                "status": "failed",
+                "error_type": "postcheck_failed",
+                "error_message": "post-check 未通过：回访反馈信息缺失",
+                "retryable": False,
+                "postcheck_passed": False,
+                "closure_confirmed": True,
+                "delivery_bound_confirmed": True,
+                "feedback_confirmed": False,
+                "postcheck_finished": finished,
+                "postcheck_delivery_ids_found": delivery_ids_found,
+                "postcheck_feedback_present": False,
+                "postcheck_checked_at": _utc_now_z(),
+            }
+        return {
+            "action": "postcheck_visit_closure",
+            "status": "success",
+            "error_type": None,
+            "error_message": None,
+            "retryable": False,
+            "postcheck_passed": True,
+            "closure_confirmed": True,
+            "delivery_bound_confirmed": True,
+            "feedback_confirmed": True,
+            "postcheck_finished": finished,
+            "postcheck_delivery_ids_found": delivery_ids_found,
+            "postcheck_feedback_present": True,
+            "postcheck_checked_at": _utc_now_z(),
+        }
+
+    @staticmethod
+    def _extract_delivery_ids_from_visit_detail(visit_detail: dict[str, Any]) -> list[str]:
+        ids: set[str] = set()
+        content_list = visit_detail.get("content_list") or []
+        if not isinstance(content_list, list):
+            return []
+        for content in content_list:
+            if not isinstance(content, dict):
+                continue
+            delivery_list = content.get("delivery_list") or []
+            if not isinstance(delivery_list, list):
+                continue
+            for delivery in delivery_list:
+                if not isinstance(delivery, dict):
+                    continue
+                delivery_id = str(delivery.get("delivery_id") or "").strip()
+                if delivery_id:
+                    ids.add(delivery_id)
+        return sorted(ids)
+
+    @staticmethod
+    def _visit_feedback_present(visit_detail: dict[str, Any]) -> bool:
+        content_list = visit_detail.get("content_list") or []
+        if not isinstance(content_list, list):
+            return False
+        for content in content_list:
+            if not isinstance(content, dict):
+                continue
+            score = content.get("score")
+            feedback_note = str(content.get("feedback_note") or "").strip()
+            if score and feedback_note:
+                return True
+        return False
+
+    @staticmethod
+    def _extract_visit_postcheck_summary(action_result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": action_result.get("status"),
+            "error_type": action_result.get("error_type"),
+            "error_message": action_result.get("error_message"),
+            "postcheck_passed": action_result.get("postcheck_passed"),
+            "closure_confirmed": action_result.get("closure_confirmed"),
+            "delivery_bound_confirmed": action_result.get("delivery_bound_confirmed"),
+            "feedback_confirmed": action_result.get("feedback_confirmed"),
+            "postcheck_finished": action_result.get("postcheck_finished"),
+            "postcheck_delivery_ids_found": action_result.get("postcheck_delivery_ids_found") or [],
+            "postcheck_feedback_present": action_result.get("postcheck_feedback_present"),
+            "postcheck_checked_at": action_result.get("postcheck_checked_at"),
+        }
+
+    @staticmethod
+    def _legacy_postcheck_pending() -> dict[str, Any]:
+        return {
+            "action": "postcheck_visit_closure",
+            "status": "pending_confirmation",
+            "error_type": "postcheck_unavailable",
+            "error_message": "legacy 模式未启用 visit post-check",
+            "retryable": True,
+            "postcheck_passed": False,
+            "closure_confirmed": False,
+            "delivery_bound_confirmed": False,
+            "feedback_confirmed": False,
+            "postcheck_finished": None,
+            "postcheck_delivery_ids_found": [],
+            "postcheck_feedback_present": False,
+            "postcheck_checked_at": _utc_now_z(),
+        }
 
     async def _run_writeback(
         self,
         context: ExecutorContext,
         final_link: str | None,
     ) -> dict[str, Any] | None:
+        if not self.settings.visit_writeback_enabled:
+            return None
         if not final_link:
             return None
         if context.source_collector_type not in {"dingtalk", "real"}:
             return None
         return await self.writeback_service.write_visit_link(context=context, final_link=final_link)
+
+    def _pending_confirmation_outcome(
+        self,
+        *,
+        diagnostics: dict[str, Any],
+        action_results: list[dict[str, Any]],
+        action_result: dict[str, Any],
+        fallback_message: str,
+        final_link: str | None = None,
+    ) -> VisitRealRunOutcome:
+        action_results = refresh_runner_diagnostics(diagnostics, action_results)
+        mark_runner_failure(diagnostics, action_result=action_result)
+        return VisitRealRunOutcome(
+            run_status="pending_confirmation",
+            final_link=final_link,
+            error_message=action_result.get("error_message") or fallback_message,
+            retryable=True,
+            action_results=action_results,
+            runner_diagnostics=diagnostics,
+        )
 
     def _failure_outcome(
         self,

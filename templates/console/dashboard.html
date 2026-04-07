@@ -147,7 +147,7 @@
         <p>这里展示当前仍需由系统创建并闭环的回访任务。执行成功后页面会自动刷新。</p>
       </div>
       <div class="inline-actions">
-        <button class="action-button danger" data-action="execute-all-visit" data-total-count="{{ pending_visit_items | length }}" {% if not pending_visit_items %}disabled{% endif %}>
+        <button class="action-button danger" data-action="execute-all-visit" data-total-count="{{ pending_visit_items | length }}" data-visit-owner="舒磊" {% if not pending_visit_items %}disabled{% endif %}>
           一键创建并闭环全部（{{ pending_visit_items | length }}）
         </button>
       </div>
@@ -174,7 +174,11 @@
           <td>{{ item.business_explanation }}</td>
           <td>
             <a href="{{ item.detail_url }}">查看任务</a>
+            {% if item.can_execute %}
             <button class="action-button danger" data-action="execute" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">一键创建并闭环</button>
+            {% else %}
+            <span class="muted">仅识别</span>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}

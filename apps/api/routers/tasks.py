@@ -2,6 +2,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, Query
 from fastapi import HTTPException
+from fastapi import Request
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_task_execution_service
@@ -10,8 +11,11 @@ from core.exceptions import OperationConflictError, ResourceNotFoundError
 from repositories.task_plan_repo import TaskPlanRepository
 from schemas.task import (
     TaskBatchExecuteRequest,
+    TaskBatchEnqueueResponse,
+    TaskBatchStatusResponse,
     TaskBatchExecuteResponse,
     TaskDetailResponse,
+    TaskEnqueueResponse,
     TaskExecuteRequest,
     TaskListResponse,
     TaskRunResponse,
@@ -87,6 +91,34 @@ async def execute_task(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/tasks/{task_id}/enqueue-execute", response_model=TaskEnqueueResponse)
+async def enqueue_execute_task(
+    task_id: uuid.UUID,
+    request: TaskExecuteRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+) -> TaskEnqueueResponse:
+    repo = TaskPlanRepository(db)
+    task_plan = repo.get_by_id(task_id)
+    if task_plan is None:
+        raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+    dispatcher = getattr(http_request.app.state, "task_dispatcher", None)
+    if dispatcher is None:
+        raise HTTPException(status_code=503, detail="dispatcher not ready")
+    enqueue_result = await dispatcher.enqueue_tasks(
+        module_code=task_plan.module_code,
+        task_plan_ids=[str(task_id)],
+        dry_run=request.dry_run,
+        trigger="manual",
+    )
+    item = enqueue_result["items"][0]
+    return TaskEnqueueResponse(
+        batch_id=str(enqueue_result["batch_id"]),
+        module_code=str(enqueue_result["module_code"]),
+        item=item,
+    )
+
+
 @router.post("/tasks/{task_id}/rerun", response_model=TaskRunResponse)
 async def rerun_task(
     task_id: uuid.UUID,
@@ -101,6 +133,48 @@ async def rerun_task(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/tasks/batch/enqueue-pending", response_model=TaskBatchEnqueueResponse)
+async def enqueue_pending_tasks(
+    request: TaskBatchExecuteRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+) -> TaskBatchEnqueueResponse:
+    dispatcher = getattr(http_request.app.state, "task_dispatcher", None)
+    if dispatcher is None:
+        raise HTTPException(status_code=503, detail="dispatcher not ready")
+    ops_service = OpsService(db)
+    pending_items = ops_service.list_pending_tasks(
+        module_code=request.module_code,
+        limit=5000,
+        month=request.month,
+        visit_owner=request.visit_owner if request.module_code == "visit" else None,
+    )
+    if request.module_code in {"inspection", "visit"}:
+        pending_items = [item for item in pending_items if item.can_execute]
+    task_ids = [item.task_plan_id for item in pending_items]
+    enqueue_result = await dispatcher.enqueue_tasks(
+        module_code=request.module_code,
+        task_plan_ids=task_ids,
+        dry_run=request.dry_run,
+        trigger="manual",
+    )
+    return TaskBatchEnqueueResponse(**enqueue_result)
+
+
+@router.get("/tasks/batches/{batch_id}", response_model=TaskBatchStatusResponse)
+async def get_task_batch_status(
+    batch_id: str,
+    http_request: Request,
+) -> TaskBatchStatusResponse:
+    dispatcher = getattr(http_request.app.state, "task_dispatcher", None)
+    if dispatcher is None:
+        raise HTTPException(status_code=503, detail="dispatcher not ready")
+    item = await dispatcher.get_batch_status(batch_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"batch not found: {batch_id}")
+    return TaskBatchStatusResponse(item=item)
+
+
 @router.post("/tasks/batch/execute-pending", response_model=TaskBatchExecuteResponse)
 async def execute_pending_tasks(
     request: TaskBatchExecuteRequest,
@@ -108,8 +182,13 @@ async def execute_pending_tasks(
     service: TaskExecutionService = Depends(get_task_execution_service),
 ) -> TaskBatchExecuteResponse:
     ops_service = OpsService(db)
-    pending_items = ops_service.list_pending_tasks(module_code=request.module_code, limit=5000, month=request.month)
-    if request.module_code == "inspection":
+    pending_items = ops_service.list_pending_tasks(
+        module_code=request.module_code,
+        limit=5000,
+        month=request.month,
+        visit_owner=request.visit_owner if request.module_code == "visit" else None,
+    )
+    if request.module_code in {"inspection", "visit"}:
         pending_items = [item for item in pending_items if item.can_execute]
     task_ids = [uuid.UUID(item.task_plan_id) for item in pending_items]
 

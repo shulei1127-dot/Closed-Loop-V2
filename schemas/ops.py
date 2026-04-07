@@ -62,6 +62,7 @@ class PendingTaskItem(BaseModel):
     customer_name: str | None = None
     delivery_id: str | None = None
     visit_type: str | None = None
+    visit_owner: str | None = None
     inspection_month: str | None = None
     executor_name: str | None = None
     work_order_link: str | None = None

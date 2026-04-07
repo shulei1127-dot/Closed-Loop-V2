@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     visit_real_final_link_path: str = "data.final_link"
     visit_real_timeout_seconds: float = 15.0
     visit_real_verify_ssl: bool = True
+    visit_prefer_direct_mode: bool = True
+    visit_browser_fallback_enabled: bool = False
+    visit_writeback_enabled: bool = False
+    task_dispatcher_worker_count: int = 4
     inspection_real_execution_enabled: bool = False
     inspection_real_base_url: str = ""
     inspection_real_token: str = ""

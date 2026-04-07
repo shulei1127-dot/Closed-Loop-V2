@@ -12,6 +12,19 @@ async function postJson(url, payload) {
   return data;
 }
 
+async function getJson(url) {
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || data.error_message || `Request failed: ${response.status}`);
+  }
+  return data;
+}
+
 function renderFeedback(kind, title, payload) {
   const panel = document.getElementById("feedback-panel");
   if (!panel) return;
@@ -22,12 +35,44 @@ function renderFeedback(kind, title, payload) {
   `;
 }
 
-function scheduleRefresh(delayMs = 1200) {
+function scheduleRefresh(delayMs = 1200, extraQuery = {}) {
   window.setTimeout(() => {
     const url = new URL(window.location.href);
+    Object.entries(extraQuery || {}).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === "") {
+        url.searchParams.delete(key);
+      } else {
+        url.searchParams.set(key, String(value));
+      }
+    });
     url.searchParams.set("_ts", Date.now().toString());
     window.location.assign(url.toString());
   }, delayMs);
+}
+
+async function pollBatchStatus(batchId, options = {}) {
+  const intervalMs = Number(options.intervalMs || 2000);
+  const extraQuery = options.extraQuery || {};
+  async function tick() {
+    const result = await getJson(`/api/tasks/batches/${batchId}`);
+    const item = result.item || {};
+    const title = item.done
+      ? "后台批量执行完成"
+      : `后台执行中：queued=${item.queued_count || 0}, running=${item.running_count || 0}`;
+    renderFeedback(item.done ? "success" : "warning", title, result);
+    if (item.done) {
+      scheduleRefresh(800, extraQuery);
+      return;
+    }
+    window.setTimeout(async () => {
+      try {
+        await tick();
+      } catch (error) {
+        renderFeedback("error", "批次状态查询失败", { batch_id: batchId, error: error.message });
+      }
+    }, intervalMs);
+  }
+  await tick();
 }
 
 function getInspectionSyncMonths() {
@@ -36,6 +81,16 @@ function getInspectionSyncMonths() {
   return Array.from(select.selectedOptions || [])
     .map((option) => option.value.trim())
     .filter(Boolean);
+}
+
+function getVisitOwnerFilter() {
+  const select = document.getElementById("visit-owner-filter");
+  if (!select) return "";
+  const value = String(select.value || "").trim();
+  if (!value || value === "all" || value === "全部") {
+    return "";
+  }
+  return value;
 }
 
 const prefetchedUrls = new Set();
@@ -78,19 +133,21 @@ function prefetchLink(link) {
 async function handleSync(button) {
   const moduleCode = button.dataset.moduleCode;
   const syncMonths = moduleCode === "inspection" ? getInspectionSyncMonths() : [];
-  renderFeedback("warning", `正在同步 ${moduleCode}...`, { module_code: moduleCode, sync_months: syncMonths });
+  const visitOwner = moduleCode === "visit" ? getVisitOwnerFilter() : "";
+  renderFeedback("warning", `正在同步 ${moduleCode}...`, { module_code: moduleCode, sync_months: syncMonths, visit_owner: visitOwner || null });
   const result = await postJson("/api/sync/run", { module_code: moduleCode, force: false, sync_months: syncMonths });
   renderFeedback("success", `同步完成：${moduleCode}`, result);
-  scheduleRefresh();
+  scheduleRefresh(1200, moduleCode === "visit" ? { visit_owner: visitOwner } : {});
 }
 
 async function handleSyncRerun(button) {
   const moduleCode = button.dataset.moduleCode;
   const syncMonths = moduleCode === "inspection" ? getInspectionSyncMonths() : [];
-  renderFeedback("warning", `正在重跑同步 ${moduleCode}...`, { module_code: moduleCode, sync_months: syncMonths });
+  const visitOwner = moduleCode === "visit" ? getVisitOwnerFilter() : "";
+  renderFeedback("warning", `正在重跑同步 ${moduleCode}...`, { module_code: moduleCode, sync_months: syncMonths, visit_owner: visitOwner || null });
   const result = await postJson(`/api/modules/${moduleCode}/sync/rerun`, { sync_months: syncMonths });
   renderFeedback("success", `重跑完成：${moduleCode}`, result);
-  scheduleRefresh();
+  scheduleRefresh(1200, moduleCode === "visit" ? { visit_owner: visitOwner } : {});
 }
 
 async function handlePrecheck(button) {
@@ -103,23 +160,39 @@ async function handlePrecheck(button) {
 async function handleExecute(button) {
   const taskId = button.dataset.taskId;
   const dryRun = button.dataset.dryRun === "true";
-  renderFeedback("warning", `正在执行 task ${taskId}...`, { task_id: taskId, dry_run: dryRun });
-  const result = await postJson(`/api/tasks/${taskId}/execute`, { dry_run: dryRun });
-  const status = result.item?.run_status || "unknown";
-  const kind = result.item?.manual_required ? "warning" : "success";
-  renderFeedback(kind, `执行结果：${status}`, result);
-  scheduleRefresh();
+  const moduleCode = (button.dataset.moduleCode || "").trim();
+  const inVisitPage = window.location.pathname.startsWith("/console/modules/visit");
+  if (moduleCode !== "visit" && !inVisitPage) {
+    renderFeedback("warning", `正在执行 task ${taskId}...`, { task_id: taskId, dry_run: dryRun });
+    const result = await postJson(`/api/tasks/${taskId}/execute`, { dry_run: dryRun });
+    const status = result.item?.run_status || "unknown";
+    const kind = result.item?.manual_required ? "warning" : "success";
+    renderFeedback(kind, `执行结果：${status}`, result);
+    scheduleRefresh();
+    return;
+  }
+  const visitOwner = getVisitOwnerFilter();
+  renderFeedback("warning", `正在提交后台执行 task ${taskId}...`, { task_id: taskId, dry_run: dryRun });
+  const result = await postJson(`/api/tasks/${taskId}/enqueue-execute`, { dry_run: dryRun });
+  renderFeedback("warning", "已提交后台执行队列", result);
+  await pollBatchStatus(result.batch_id, { extraQuery: { visit_owner: visitOwner } });
 }
 
 async function handleExecuteAllVisit(button) {
   const totalCount = Number.parseInt(button.dataset.totalCount || "0", 10);
-  if (!window.confirm(`将按顺序创建并闭环全部待执行回访任务（当前 ${totalCount} 条）。是否继续？`)) {
+  const visitOwner = getVisitOwnerFilter() || button.dataset.visitOwner || "";
+  const ownerLabel = visitOwner ? `（回访人：${visitOwner}）` : "（全部回访人）";
+  if (!window.confirm(`将把全部待执行回访任务提交到后台队列执行（当前 ${totalCount} 条）${ownerLabel}。是否继续？`)) {
     return;
   }
-  renderFeedback("warning", "正在批量创建并闭环待执行回访...", { module_code: "visit", total_count: totalCount });
-  const result = await postJson("/api/tasks/batch/execute-pending", { module_code: "visit", dry_run: false });
-  renderFeedback("success", "批量执行完成", result);
-  scheduleRefresh(1800);
+  renderFeedback("warning", `正在提交批量后台执行${ownerLabel}...`, { module_code: "visit", total_count: totalCount, visit_owner: visitOwner || null });
+  const payload = { module_code: "visit", dry_run: false };
+  if (visitOwner) {
+    payload.visit_owner = visitOwner;
+  }
+  const result = await postJson("/api/tasks/batch/enqueue-pending", payload);
+  renderFeedback("warning", "批量任务已入队，后台执行中", result);
+  await pollBatchStatus(result.batch_id, { extraQuery: { visit_owner: visitOwner } });
 }
 
 async function handleExecuteAllInspection(button) {

@@ -27,7 +27,9 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.filters["to_pretty_json"] = lambda value: json.dumps(value or {}, ensure_ascii=False, indent=2)
-templates.env.globals["static_rev"] = str(int((BASE_DIR / "static" / "console" / "app.js").stat().st_mtime))
+_app_js_mtime = (BASE_DIR / "static" / "console" / "app.js").stat().st_mtime
+_app_css_mtime = (BASE_DIR / "static" / "console" / "console.css").stat().st_mtime
+templates.env.globals["static_rev"] = str(int(max(_app_js_mtime, _app_css_mtime)))
 
 
 def _format_local_datetime(value) -> str:
@@ -68,7 +70,10 @@ def console_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLRe
             "module_summaries": [item.model_dump() for item in ops_service.build_overview()],
             "failure_items": [item.model_dump() for item in ops_service.list_failures(limit=10)],
             "manual_required_items": [item.model_dump() for item in ops_service.list_manual_required(limit=10)],
-            "pending_visit_items": [item.model_dump() for item in ops_service.list_pending_tasks(module_code="visit", limit=20)],
+            "pending_visit_items": [
+                item.model_dump()
+                for item in ops_service.list_pending_tasks(module_code="visit", limit=20, visit_owner="舒磊")
+            ],
             "pending_inspection_items": [
                 item.model_dump()
                 for item in ops_service.list_pending_tasks(module_code="inspection", limit=50, month=inspection_month)
@@ -90,13 +95,33 @@ def console_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLRe
 def console_visit_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     ops_service = OpsService(db)
     module_summary_map = {item.module_code: item.model_dump() for item in ops_service.build_overview()}
+    selected_visit_owner = (request.query_params.get("visit_owner") or "").strip()
+    visit_owner_filter = None if selected_visit_owner in {"", "all", "全部"} else selected_visit_owner
+    pending_visit_items = [
+        item.model_dump()
+        for item in ops_service.list_pending_tasks(
+            module_code="visit",
+            limit=200,
+            visit_owner=visit_owner_filter,
+        )
+    ]
+    pending_visit_executable_count = sum(1 for item in pending_visit_items if item.get("can_execute"))
+    pending_visit_total_count = len(ops_service.list_pending_tasks(module_code="visit", limit=5000, visit_owner=None))
+    available_visit_owners = ops_service.list_visit_owners()
+    if selected_visit_owner and selected_visit_owner not in {"all", "全部", *available_visit_owners}:
+        available_visit_owners = sorted({*available_visit_owners, selected_visit_owner})
     return templates.TemplateResponse(
         name="console/module_visit.html",
         request=request,
         context={
             "page_title": "交付转售后回访",
             "module_summary": module_summary_map.get("visit"),
-            "pending_visit_items": [item.model_dump() for item in ops_service.list_pending_tasks(module_code="visit", limit=100)],
+            "pending_visit_items": pending_visit_items,
+            "pending_visit_executable_count": pending_visit_executable_count,
+            "pending_visit_filtered_count": len(pending_visit_items),
+            "pending_visit_total_count": pending_visit_total_count,
+            "selected_visit_owner": selected_visit_owner,
+            "available_visit_owners": available_visit_owners,
             "recent_visit_links": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=20)],
             "active_nav": "module_visit",
         },

@@ -25,6 +25,7 @@ class TaskRunResponse(BaseModel):
 class TaskBatchExecuteRequest(BaseModel):
     module_code: str
     month: str | None = None
+    visit_owner: str | None = None
     dry_run: bool = False
 
 
@@ -36,3 +37,33 @@ class TaskBatchExecuteResponse(BaseModel):
     failed_count: int
     manual_required_count: int
     items: list[TaskRunDetail]
+
+
+class TaskEnqueueItem(BaseModel):
+    job_id: str | None = None
+    task_plan_id: str
+    accepted: bool
+    status: str
+    message: str | None = None
+
+
+class TaskEnqueueResponse(BaseModel):
+    ok: bool = True
+    batch_id: str
+    module_code: str
+    item: TaskEnqueueItem
+
+
+class TaskBatchEnqueueResponse(BaseModel):
+    ok: bool = True
+    batch_id: str
+    module_code: str
+    requested_count: int
+    enqueued_count: int
+    duplicate_count: int
+    items: list[TaskEnqueueItem]
+
+
+class TaskBatchStatusResponse(BaseModel):
+    ok: bool = True
+    item: dict

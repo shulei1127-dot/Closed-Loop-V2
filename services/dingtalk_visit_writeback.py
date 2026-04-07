@@ -70,14 +70,29 @@ class DingtalkVisitWritebackService:
             async with _shared_chrome_dingtalk_session() as chrome:
                 await chrome.open_url(document_url)
                 await chrome.wait_until_ready()
-                await chrome.focus_grid(customer_field_id)
-                await chrome.navigate_to_row(
-                    target_row_id=target_row_id,
-                    target_row_index=target_row_index,
-                    record_ids=structure.record_ids,
-                    customer_field_id=customer_field_id,
-                )
+                await chrome.ensure_column_visible(customer_field_id)
+                try_select_cell = getattr(chrome, "try_select_cell", None)
+                if callable(try_select_cell):
+                    selected_target = await try_select_cell(
+                        target_row_id=target_row_id,
+                        field_id=customer_field_id,
+                    )
+                else:
+                    try:
+                        await chrome.select_cell(target_row_id=target_row_id, field_id=customer_field_id)
+                        selected_target = True
+                    except DingtalkVisitWritebackError:
+                        selected_target = False
+                if not selected_target:
+                    await chrome.focus_grid(customer_field_id)
+                    await chrome.navigate_to_row(
+                        target_row_id=target_row_id,
+                        target_row_index=target_row_index,
+                        record_ids=structure.record_ids,
+                        customer_field_id=customer_field_id,
+                    )
                 await chrome.select_cell(target_row_id=target_row_id, field_id=customer_field_id)
+                await chrome.ensure_column_visible(target_field_id)
                 await chrome.move_selection_to_field(target_field_id=target_field_id)
                 await chrome.open_link_editor()
                 await chrome.fill_link_editor(title=final_link, url=final_link)
@@ -337,8 +352,44 @@ class _ChromeDingtalkSession:
         visible_rows = await self._visible_rows()
         if not visible_rows:
             raise DingtalkVisitWritebackError("钉钉文档当前没有可见数据行", error_type="response_invalid")
-        first_row_id = visible_rows[0]["rowId"]
-        await self.select_cell(target_row_id=first_row_id, field_id=customer_field_id)
+        for row in visible_rows:
+            if await self.try_select_cell(target_row_id=row["rowId"], field_id=customer_field_id):
+                return
+        fallback_selected = await self._execute_js(
+            """
+            (function() {
+              const cell = document.querySelector('[data-row-id][data-field-id]');
+              if (!cell) return JSON.stringify({ok:false});
+              cell.scrollIntoView({block:'center', inline:'center'});
+              const rect = cell.getBoundingClientRect();
+              const cx = rect.left + rect.width / 2;
+              const cy = rect.top + rect.height / 2;
+              const fire = (type) => cell.dispatchEvent(new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                clientX: cx,
+                clientY: cy,
+                button: 0,
+                buttons: 1,
+              }));
+              fire('pointerdown');
+              fire('mousedown');
+              fire('pointerup');
+              fire('mouseup');
+              fire('click');
+              if (typeof cell.focus === 'function') cell.focus();
+              return JSON.stringify({
+                ok:true,
+                row: cell.getAttribute('data-row-id') || '',
+                field: cell.getAttribute('data-field-id') || ''
+              });
+            })()
+            """
+        )
+        if fallback_selected.get("ok"):
+            return
+        raise DingtalkVisitWritebackError("钉钉文档网格无法聚焦", error_type="response_invalid", retryable=False)
 
     async def navigate_to_row(
         self,
@@ -437,6 +488,13 @@ class _ChromeDingtalkSession:
             timeout=4.0,
             interval=0.1,
         )
+
+    async def try_select_cell(self, *, target_row_id: str, field_id: str) -> bool:
+        try:
+            await self.select_cell(target_row_id=target_row_id, field_id=field_id)
+            return True
+        except DingtalkVisitWritebackError:
+            return False
 
     async def move_selection_to_field(self, *, target_field_id: str) -> None:
         for _ in range(24):

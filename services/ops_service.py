@@ -39,7 +39,9 @@ class OpsService:
         self.inspection_report_matcher = InspectionReportMatcher(required_file_types=("word",))
         self._inspection_report_files_cache = None
         self._inspection_report_match_cache: dict[str, object] = {}
-        self._pending_task_groups_cache: dict[tuple[str | None, str | None], list[dict[str, object]]] = {}
+        self._pending_task_groups_cache: dict[
+            tuple[str | None, str | None, str | None], list[dict[str, object]]
+        ] = {}
 
     def build_overview(self) -> list[OpsOverviewItem]:
         module_summaries = self.sync_service.build_module_summaries()
@@ -128,11 +130,13 @@ class OpsService:
         module_code: str | None = None,
         limit: int = 20,
         month: str | None = None,
+        visit_owner: str | None = None,
     ) -> list[PendingTaskItem]:
         items: list[PendingTaskItem] = []
         runtime_snapshot = runtime_state.snapshot()
         running_task_ids = set(runtime_snapshot["running_task_ids"])
-        for group in self._collect_pending_task_groups(module_code=module_code, month=month):
+        queued_task_ids = set(runtime_snapshot.get("queued_task_ids", []))
+        for group in self._collect_pending_task_groups(module_code=module_code, month=month, visit_owner=visit_owner):
             task = group["task"]
             latest_run = group["latest_run"]
             record = group["record"]
@@ -162,8 +166,12 @@ class OpsService:
                 latest_run=latest_run,
                 normalized_data=normalized_data,
                 running_task_ids=running_task_ids,
+                queued_task_ids=queued_task_ids,
                 has_report_word_file=bool(report_word_file),
             )
+            can_execute = state["code"] in {"actionable", "failed"}
+            if task.module_code == "visit" and state["code"] in {"pending_confirmation"}:
+                can_execute = True
             items.append(
                 PendingTaskItem(
                     task_plan_id=str(task.id),
@@ -172,6 +180,7 @@ class OpsService:
                     customer_name=customer_name,
                     delivery_id=normalized_data.get("delivery_id"),
                     visit_type=normalized_data.get("visit_type"),
+                    visit_owner=normalized_data.get("visit_owner"),
                     inspection_month=normalized_data.get("inspection_month"),
                     executor_name=normalized_data.get("executor_name"),
                     work_order_link=normalized_data.get("work_order_link"),
@@ -185,7 +194,7 @@ class OpsService:
                     state_code=state["code"],
                     state_label=state["label"],
                     state_tone=state["tone"],
-                    can_execute=state["code"] in {"actionable", "failed"},
+                    can_execute=can_execute,
                     detail_url=f"/console/tasks?module_code={task.module_code}&status=planned&task_id={task.id}",
                 )
             )
@@ -198,6 +207,22 @@ class OpsService:
             reverse=True,
         )
         return items[:limit]
+
+    def list_visit_owners(self) -> list[str]:
+        owners: set[str] = set()
+        tasks = self.task_repo.list_latest_by_business_key(module_code="visit", status=None)
+        records = self.record_repo.get_by_ids([task.normalized_record_id for task in tasks])
+        for task in tasks:
+            record = records.get(task.normalized_record_id)
+            normalized_data = (getattr(record, "normalized_data", {}) or {}) if record else {}
+            if str(normalized_data.get("visit_status") or "").strip() != "已回访":
+                continue
+            if str(normalized_data.get("visit_link") or "").strip():
+                continue
+            owner = str(normalized_data.get("visit_owner") or "").strip()
+            if owner:
+                owners.add(owner)
+        return sorted(owners)
 
     def list_pending_inspection_months(self) -> list[str]:
         months: set[str] = set()
@@ -226,17 +251,17 @@ class OpsService:
         seen_links: set[str] = set()
         recent_limit = max((limit or 100) * 10, 50)
         for task_run in self.task_run_repo.list_recent(limit=recent_limit):
-            if task_run.run_status not in {"success", "simulated_success"} or task_run.manual_required:
-                continue
-            result_payload = task_run.result_payload or {}
-            final_link = result_payload.get("final_link") or getattr(task_run, "final_link", None)
-            if not final_link or final_link in seen_links:
-                continue
             task_plan = self.task_repo.get_by_id(task_run.task_plan_id)
             if task_plan is None or task_plan.module_code != "visit":
                 continue
             record = self.record_repo.get_by_id(task_plan.normalized_record_id)
             normalized_data = (getattr(record, "normalized_data", {}) or {}) if record else {}
+            if not self._visit_run_counts_as_closed(task_run, normalized_data):
+                continue
+            result_payload = task_run.result_payload or {}
+            final_link = result_payload.get("final_link") or getattr(task_run, "final_link", None)
+            if not final_link or final_link in seen_links:
+                continue
             customer_name = self._resolve_customer_name(result_payload, record)
             visit_type = normalized_data.get("visit_type") or (task_plan.planned_payload or {}).get("visit_type")
             items.append(
@@ -390,6 +415,39 @@ class OpsService:
             return False
         return stage not in {"审核工单", "完成"}
 
+    @staticmethod
+    def _visit_run_counts_as_closed(task_run, normalized_data: dict[str, object]) -> bool:
+        if task_run.manual_required:
+            return False
+        payload = dict(task_run.result_payload or {})
+        if task_run.run_status != "success":
+            return False
+        if payload.get("execution_mode") != "real":
+            return False
+        diagnostics = payload.get("runner_diagnostics") or {}
+        postcheck = diagnostics.get("postcheck") or {}
+        postcheck_passed = payload.get("postcheck_passed")
+        closure_confirmed = payload.get("closure_confirmed")
+        delivery_bound_confirmed = payload.get("delivery_bound_confirmed")
+        feedback_confirmed = payload.get("feedback_confirmed")
+        if postcheck_passed is None:
+            postcheck_passed = postcheck.get("postcheck_passed")
+        if closure_confirmed is None:
+            closure_confirmed = postcheck.get("closure_confirmed")
+        if delivery_bound_confirmed is None:
+            delivery_bound_confirmed = postcheck.get("delivery_bound_confirmed")
+        if feedback_confirmed is None:
+            feedback_confirmed = postcheck.get("feedback_confirmed")
+        if (
+            postcheck_passed is True
+            and closure_confirmed is True
+            and delivery_bound_confirmed is True
+            and feedback_confirmed is True
+        ):
+            return True
+        # 兼容人工闭环后的钉钉行：仅在回访链接已写回时算闭环
+        return bool(str(normalized_data.get("visit_link") or "").strip())
+
     def list_failures(self, limit: int = 20) -> list[OpsEventItem]:
         items: list[OpsEventItem] = []
         for snapshot in self.snapshot_repo.list_failed(limit=limit):
@@ -528,7 +586,9 @@ class OpsService:
             if task_run.run_status != "success":
                 return False
             return self._inspection_run_counts_as_closed(task_run, normalized_data)
-        if task.module_code in {"visit", "proactive"}:
+        if task.module_code == "visit":
+            return self._visit_run_counts_as_closed(task_run, normalized_data)
+        if task.module_code == "proactive":
             return (
                 task_run.run_status in {"success", "simulated_success"}
                 and bool(str(normalized_data.get("visit_link") or "").strip())
@@ -552,7 +612,9 @@ class OpsService:
             return False
         if module_code == "inspection":
             return self._inspection_normalized_state_counts_as_closed(normalized_data)
-        if module_code in {"visit", "proactive"}:
+        if module_code == "visit":
+            return self._visit_run_counts_as_closed(latest_success, normalized_data)
+        if module_code == "proactive":
             return bool(str(normalized_data.get("visit_link") or "").strip())
         return True
 
@@ -567,8 +629,10 @@ class OpsService:
         self,
         module_code: str | None = None,
         month: str | None = None,
+        visit_owner: str | None = None,
     ) -> list[dict[str, object]]:
-        cache_key = (module_code, month)
+        owner_key = (visit_owner or "").strip() or None
+        cache_key = (module_code, month, owner_key)
         cached_groups = self._pending_task_groups_cache.get(cache_key)
         if cached_groups is not None:
             return cached_groups
@@ -603,6 +667,9 @@ class OpsService:
             if month and task.module_code == "inspection":
                 if normalized_data.get("inspection_month") != month:
                     continue
+            if task.module_code == "visit" and owner_key:
+                if str(normalized_data.get("visit_owner") or "").strip() != owner_key:
+                    continue
             if (task.module_code, source_row_id, task.task_type) in successful_keys:
                 if self._successful_business_key_counts_as_completed(
                     module_code=task.module_code,
@@ -628,13 +695,33 @@ class OpsService:
         latest_run,
         normalized_data: dict[str, object],
         running_task_ids: set[str],
+        queued_task_ids: set[str],
         has_report_word_file: bool,
     ) -> dict[str, str]:
-        if task.module_code != "inspection":
-            return {"code": "actionable", "label": "可执行", "tone": "success"}
-
+        if str(task.id) in queued_task_ids:
+            return {"code": "queued", "label": "排队中", "tone": "warning"}
         if str(task.id) in running_task_ids:
             return {"code": "running", "label": "执行中", "tone": "warning"}
+
+        if task.module_code == "visit":
+            if not str(normalized_data.get("delivery_id") or "").strip():
+                return {"code": "manual_required", "label": "缺少Delivery ID", "tone": "manual"}
+            if not str(normalized_data.get("pts_link") or "").strip():
+                return {"code": "manual_required", "label": "缺少PTS链接", "tone": "manual"}
+            if latest_run and self._visit_run_counts_as_closed(latest_run, normalized_data):
+                return {"code": "closed_success", "label": "已闭环", "tone": "success"}
+            if latest_run and latest_run.manual_required:
+                return {"code": "manual_required", "label": "需人工处理", "tone": "manual"}
+            if latest_run and latest_run.run_status == "pending_confirmation":
+                return {"code": "pending_confirmation", "label": "状态待确认", "tone": "warning"}
+            if latest_run and latest_run.run_status == "success":
+                return {"code": "pending_confirmation", "label": "状态待确认", "tone": "warning"}
+            if latest_run and latest_run.run_status in {"failed", "precheck_failed"}:
+                return {"code": "failed", "label": "执行失败", "tone": "failed"}
+            return {"code": "actionable", "label": "可执行", "tone": "success"}
+
+        if task.module_code != "inspection":
+            return {"code": "actionable", "label": "可执行", "tone": "success"}
         if not has_report_word_file:
             return {"code": "manual_required", "label": "缺少报告", "tone": "manual"}
         if latest_run and latest_run.manual_required:

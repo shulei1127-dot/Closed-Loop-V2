@@ -195,15 +195,14 @@ class TaskExecutionService:
             return None
         if not record.source_row_id:
             return None
-        current_visit_link = str((record.normalized_data or {}).get("visit_link") or "").strip()
-        if not current_visit_link:
-            return None
         existing_success = self.task_run_repo.latest_success_for_business_key(
             module_code=task_plan.module_code,
             source_row_id=record.source_row_id,
             task_type=task_plan.task_type,
         )
         if existing_success is None:
+            return None
+        if not self._visit_run_has_strict_closure(existing_success):
             return None
         return ExecutionResult(
             run_status="precheck_failed",
@@ -215,6 +214,33 @@ class TaskExecutionService:
             },
             final_link=existing_success.final_link,
             executor_version="phase9-visit-real-v1",
+        )
+
+    @staticmethod
+    def _visit_run_has_strict_closure(task_run) -> bool:
+        payload = dict(getattr(task_run, "result_payload", {}) or {})
+        diagnostics = payload.get("runner_diagnostics") or {}
+        postcheck = diagnostics.get("postcheck") or {}
+        postcheck_passed = payload.get("postcheck_passed")
+        closure_confirmed = payload.get("closure_confirmed")
+        delivery_bound_confirmed = payload.get("delivery_bound_confirmed")
+        feedback_confirmed = payload.get("feedback_confirmed")
+        if postcheck_passed is None:
+            postcheck_passed = postcheck.get("postcheck_passed")
+        if closure_confirmed is None:
+            closure_confirmed = postcheck.get("closure_confirmed")
+        if delivery_bound_confirmed is None:
+            delivery_bound_confirmed = postcheck.get("delivery_bound_confirmed")
+        if feedback_confirmed is None:
+            feedback_confirmed = postcheck.get("feedback_confirmed")
+        return (
+            task_run.run_status == "success"
+            and not bool(getattr(task_run, "manual_required", False))
+            and payload.get("execution_mode") == "real"
+            and postcheck_passed is True
+            and closure_confirmed is True
+            and delivery_bound_confirmed is True
+            and feedback_confirmed is True
         )
 
     def _select_executor(self, task_plan: TaskPlan):

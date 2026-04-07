@@ -7,6 +7,26 @@
       <p class="eyebrow">Visit Module</p>
       <h3>交付转售后回访</h3>
       <p class="muted">这里集中看需要创建并闭环的回访任务，以及最近已经成功闭环的回访链接。</p>
+      <div class="visit-owner-filter">
+        <label for="visit-owner-filter">回访人筛选</label>
+        <div class="visit-owner-filter-main">
+          <input
+            id="visit-owner-filter"
+            class="visit-owner-input"
+            list="visit-owner-options"
+            type="text"
+            placeholder="输入回访人姓名，留空或输入“全部”表示不过滤"
+            value="{{ selected_visit_owner }}"
+          />
+          <datalist id="visit-owner-options">
+            <option value="全部"></option>
+            {% for owner in available_visit_owners %}
+            <option value="{{ owner }}"></option>
+            {% endfor %}
+          </datalist>
+        </div>
+        <p class="visit-owner-helper">先输入回访人，再点击“立即同步”或“重跑同步”。</p>
+      </div>
     </div>
     <div class="inline-actions">
       <button
@@ -38,7 +58,8 @@
     <dl class="stats">
       <div><dt>最近同步</dt><dd>{{ module_summary.latest_snapshot_time | fmt_dt }}</dd></div>
       <div><dt>最近执行</dt><dd>{{ module_summary.latest_execute_status_label or '暂无' }}</dd></div>
-      <div><dt>待执行</dt><dd>{{ module_summary.planned_tasks }}</dd></div>
+      <div><dt>待执行（当前筛选）</dt><dd>{{ pending_visit_filtered_count }}</dd></div>
+      <div><dt>待执行（全量）</dt><dd>{{ pending_visit_total_count }}</dd></div>
       <div><dt>记录数</dt><dd>{{ module_summary.row_count }}</dd></div>
       <div><dt>失败任务</dt><dd>{{ module_summary.failed_task_count }}</dd></div>
       <div><dt>需人工处理</dt><dd>{{ module_summary.manual_required_count }}</dd></div>
@@ -51,10 +72,16 @@
     <div class="section-head">
       <div>
         <h4>待执行回访任务</h4>
-        <p class="muted">这里只展示当前真的还需要处理的交付转售后回访任务。</p>
+        <p class="muted">按所选回访人展示待执行任务；点击后任务会进入后台队列异步执行，页面会自动轮询执行进度。</p>
       </div>
-      <button class="action-button danger" data-action="execute-all-visit" data-total-count="{{ pending_visit_items | length }}" {% if not pending_visit_items %}disabled{% endif %}>
-        一键创建并闭环全部（{{ pending_visit_items | length }}）
+      <button
+        class="action-button danger"
+        data-action="execute-all-visit"
+        data-total-count="{{ pending_visit_executable_count }}"
+        data-visit-owner="{{ selected_visit_owner }}"
+        {% if not pending_visit_executable_count %}disabled{% endif %}
+      >
+        一键创建并闭环全部（后台执行 {{ pending_visit_executable_count }}）
       </button>
     </div>
     {% if pending_visit_items %}
@@ -62,8 +89,10 @@
       <thead>
         <tr>
           <th>客户名称</th>
+          <th>回访人</th>
           <th>回访类型</th>
           <th>Delivery ID</th>
+          <th>状态</th>
           <th>最近执行</th>
           <th>状态说明</th>
           <th>操作</th>
@@ -73,13 +102,19 @@
         {% for item in pending_visit_items %}
         <tr>
           <td>{{ item.customer_name or '未知客户' }}</td>
+          <td>{{ item.visit_owner or '未识别' }}</td>
           <td>{{ item.visit_type or item.task_type }}</td>
           <td>{{ item.delivery_id or '缺失' }}</td>
+          <td><span class="badge status-{{ item.state_tone or 'unknown' }}">{{ item.state_label or '待处理' }}</span></td>
           <td>{{ item.latest_run_time | fmt_dt if item.latest_run_time else '未执行' }}</td>
           <td>{{ item.business_explanation }}</td>
           <td>
             <a href="{{ item.detail_url }}">查看任务</a>
-            <button class="action-button danger" data-action="execute" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">一键创建并闭环</button>
+            {% if item.can_execute %}
+            <button class="action-button danger" data-action="execute" data-module-code="visit" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">一键创建并闭环</button>
+            {% else %}
+            <span class="muted">补齐字段后可执行</span>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}

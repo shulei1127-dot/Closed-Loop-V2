@@ -12,6 +12,7 @@ from core.exceptions import EnvironmentDependencyError
 from core.logging import configure_logging
 from core.scheduler import build_scheduler
 from scheduler.jobs import register_jobs
+from services.task_dispatcher import get_task_dispatcher
 
 
 @asynccontextmanager
@@ -20,15 +21,19 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     scheduler = build_scheduler()
     job_ids = register_jobs(scheduler)
+    dispatcher = get_task_dispatcher()
+    await dispatcher.start()
     if settings.scheduler_enabled:
         scheduler.start()
     app.state.scheduler = scheduler
     app.state.scheduler_job_ids = job_ids
+    app.state.task_dispatcher = dispatcher
     try:
         yield
     finally:
         if settings.scheduler_enabled:
             scheduler.shutdown(wait=False)
+        await dispatcher.stop()
 
 
 settings = get_settings()

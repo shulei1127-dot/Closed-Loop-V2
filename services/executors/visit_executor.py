@@ -39,8 +39,6 @@ class VisitExecutor:
                 payload={"missing_fields": missing_fields},
             )
 
-        if data.get("visit_owner") != "舒磊":
-            return self._precheck_failed("visit_owner 不是舒磊，禁止执行", context)
         if data.get("visit_status") != "已回访":
             return self._precheck_failed("visit_status 不是已回访，禁止执行", context)
         if data.get("visit_link"):
@@ -128,6 +126,9 @@ class VisitExecutor:
 
         outcome = await self.real_runner.run(context, actions)
         execution_mode = "real" if outcome.run_status == "success" else "real_attempted"
+        postcheck_payload = self._extract_postcheck_payload(outcome.runner_diagnostics)
+        if outcome.final_link:
+            postcheck_payload["final_link"] = outcome.final_link
         if outcome.run_status == "success":
             return ExecutionResult(
                 run_status="success",
@@ -139,6 +140,23 @@ class VisitExecutor:
                     action_results=outcome.action_results,
                     execution_mode=execution_mode,
                     runner_diagnostics=outcome.runner_diagnostics,
+                    extra_payload=postcheck_payload,
+                ),
+            )
+        if outcome.run_status == "pending_confirmation":
+            return ExecutionResult(
+                run_status="pending_confirmation",
+                executor_version=self.executor_version,
+                final_link=outcome.final_link,
+                error_message=outcome.error_message,
+                retryable=True,
+                result_payload=self._build_payload(
+                    context,
+                    actions=actions,
+                    action_results=outcome.action_results,
+                    execution_mode=execution_mode,
+                    runner_diagnostics=outcome.runner_diagnostics,
+                    extra_payload=postcheck_payload,
                 ),
             )
 
@@ -154,6 +172,7 @@ class VisitExecutor:
                 action_results=outcome.action_results,
                 execution_mode=execution_mode,
                 runner_diagnostics=outcome.runner_diagnostics,
+                extra_payload=postcheck_payload,
             ),
         )
 
@@ -277,3 +296,23 @@ class VisitExecutor:
             real_execution_enabled=self.settings.enable_real_execution,
             visit_real_execution_enabled=self.settings.visit_real_execution_enabled,
         )
+
+    @staticmethod
+    def _extract_postcheck_payload(runner_diagnostics: dict[str, Any] | None) -> dict[str, Any]:
+        diagnostics = runner_diagnostics or {}
+        postcheck = diagnostics.get("postcheck") or {}
+        if not isinstance(postcheck, dict):
+            return {}
+        return {
+            "postcheck_passed": postcheck.get("postcheck_passed"),
+            "closure_confirmed": postcheck.get("closure_confirmed"),
+            "delivery_bound_confirmed": postcheck.get("delivery_bound_confirmed"),
+            "feedback_confirmed": postcheck.get("feedback_confirmed"),
+            "postcheck_finished": postcheck.get("postcheck_finished"),
+            "postcheck_delivery_ids_found": postcheck.get("postcheck_delivery_ids_found") or [],
+            "postcheck_feedback_present": postcheck.get("postcheck_feedback_present"),
+            "postcheck_checked_at": postcheck.get("postcheck_checked_at"),
+            "postcheck_error_type": postcheck.get("error_type"),
+            "postcheck_error_message": postcheck.get("error_message"),
+            "final_link": diagnostics.get("final_link"),
+        }

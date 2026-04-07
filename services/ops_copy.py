@@ -5,9 +5,13 @@ from typing import Any
 
 STATUS_LABELS = {
     "success": "成功",
+    "closed_success": "已闭环",
     "partial": "部分成功",
     "failed": "失败",
     "planned": "待执行",
+    "queued": "排队中",
+    "running": "执行中",
+    "pending_confirmation": "状态待确认",
     "skipped": "已跳过",
     "precheck_failed": "预检查失败",
     "precheck_passed": "预检查通过",
@@ -19,8 +23,12 @@ STATUS_LABELS = {
 
 STATUS_TONES = {
     "success": "success",
+    "closed_success": "success",
     "partial": "warning",
     "planned": "success",
+    "queued": "warning",
+    "running": "warning",
+    "pending_confirmation": "warning",
     "precheck_passed": "success",
     "dry_run_ready": "success",
     "simulated_success": "success",
@@ -40,6 +48,7 @@ ERROR_COPY = {
     "business_rejected": "业务条件不满足，无法自动继续。",
     "permission_denied": "权限不足，需要人工处理。",
     "postcheck_failed": "工单动作已执行，但最终闭环校验未通过。",
+    "postcheck_unavailable": "缺少闭环校验能力，当前状态待确认。",
     "stage_refresh_failed": "执行后状态刷新失败，当前真实闭环状态待确认。",
     "upload_failed": "巡检报告上传失败，未能完成自动闭环。",
     "complete_failed": "工单阶段推进失败，未能完成自动闭环。",

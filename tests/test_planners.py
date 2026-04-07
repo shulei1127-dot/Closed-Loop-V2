@@ -23,9 +23,9 @@ def test_visit_planner_marks_only_matching_rows_as_planned() -> None:
                 "recognition_status": "full",
                 "normalized_data": {
                     "customer_name": "杭州客户",
-                    "delivery_id": None,
+                    "delivery_id": "DEL-002",
                     "visit_owner": "其他人",
-                    "visit_status": "待回访",
+                    "visit_status": "已回访",
                     "visit_link": None,
                 },
             },
@@ -35,9 +35,8 @@ def test_visit_planner_marks_only_matching_rows_as_planned() -> None:
     assert result[0].eligibility is True
     assert result[0].plan_status == "planned"
     assert result[0].task_type == "visit_close"
-    assert result[1].eligibility is False
-    assert result[1].plan_status == "skipped"
-    assert "customer_name" in (result[1].skip_reason or "")
+    assert result[1].eligibility is True
+    assert result[1].plan_status == "planned"
 
 
 def test_inspection_planner_uses_updated_eligibility_rules() -> None:

@@ -33,7 +33,7 @@ class VisitActionBuilder:
             },
             {
                 "action": "assign_owner",
-                "owner": "舒磊",
+                "owner": data.get("visit_owner"),
             },
             {
                 "action": "mark_visit_target",

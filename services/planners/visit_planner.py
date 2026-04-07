@@ -9,12 +9,15 @@ class VisitPlanner:
             eligible = (
                 bool(data.get("customer_name"))
                 and item.get("recognition_status") != "failed"
-                and bool(data.get("delivery_id"))
-                and data.get("visit_owner") == "舒磊"
+                and bool(data.get("visit_owner"))
                 and data.get("visit_status") == "已回访"
                 and not data.get("visit_link")
             )
-            skip_reason = None if eligible else "不满足 customer_name 存在、delivery_id 存在、visit_owner=舒磊、visit_status=已回访、visit_link 为空"
+            skip_reason = (
+                None
+                if eligible
+                else "不满足 customer_name 存在、visit_owner 存在、visit_status=已回访、visit_link 为空"
+            )
             task_plans.append(
                 TaskPlanDTO(
                     module_code="visit",
@@ -27,6 +30,8 @@ class VisitPlanner:
                         "customer_name": data.get("customer_name"),
                         "delivery_id": data.get("delivery_id"),
                         "pts_link": data.get("pts_link"),
+                        "visit_owner": data.get("visit_owner"),
+                        "visit_status": data.get("visit_status"),
                     },
                 )
             )

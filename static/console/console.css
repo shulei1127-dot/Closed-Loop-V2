@@ -171,6 +171,58 @@ pre {
   gap: 1rem;
 }
 
+.module-page-hero .inline-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.visit-owner-filter {
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.45rem;
+  max-width: 620px;
+}
+
+.visit-owner-filter label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.visit-owner-filter-main {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.visit-owner-input {
+  flex: 1;
+  min-width: 280px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.7rem 0.85rem;
+  background: #fffdf8;
+  color: var(--ink);
+  font: inherit;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.visit-owner-input::placeholder {
+  color: #889186;
+}
+
+.visit-owner-input:focus {
+  outline: none;
+  border-color: rgba(25, 95, 74, 0.45);
+  box-shadow: 0 0 0 3px rgba(25, 95, 74, 0.12);
+}
+
+.visit-owner-helper {
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -375,5 +427,28 @@ pre {
 
   .two-column {
     grid-template-columns: 1fr;
+  }
+
+  .module-page-hero {
+    flex-direction: column;
+  }
+
+  .module-page-hero .inline-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .visit-owner-filter {
+    max-width: 100%;
+  }
+
+  .visit-owner-filter-main {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .visit-owner-input {
+    min-width: 0;
+    width: 100%;
   }
 }
