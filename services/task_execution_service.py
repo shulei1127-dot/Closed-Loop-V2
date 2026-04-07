@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,7 @@ from services.executors.inspection_executor import InspectionExecutor
 from services.executors.proactive_executor import ProactiveExecutor
 from services.executors.schemas import ExecutionResult, ExecutorContext
 from services.executors.visit_executor import VisitExecutor
+from services.recognizers.inspection_work_order_backfill import InspectionWorkOrderStageBackfill
 
 
 EXECUTOR_REGISTRY = {
@@ -107,6 +109,13 @@ class TaskExecutionService:
                     and result.retryable
                     and attempt < max_attempts
                 ):
+                    await self._refresh_inspection_state_after_execute(task_plan, record, task_run)
+                if not (
+                    allow_auto_retry
+                    and result.run_status == "failed"
+                    and result.retryable
+                    and attempt < max_attempts
+                ):
                     return self._to_task_run_detail(task_run)
                 attempt += 1
                 retry_count += 1
@@ -186,6 +195,9 @@ class TaskExecutionService:
             return None
         if not record.source_row_id:
             return None
+        current_visit_link = str((record.normalized_data or {}).get("visit_link") or "").strip()
+        if not current_visit_link:
+            return None
         existing_success = self.task_run_repo.latest_success_for_business_key(
             module_code=task_plan.module_code,
             source_row_id=record.source_row_id,
@@ -210,6 +222,65 @@ class TaskExecutionService:
         if executor_cls is None:
             raise ValueError("executor 与 module_code / task_type 不匹配")
         return executor_cls()
+
+    async def _refresh_inspection_state_after_execute(
+        self,
+        task_plan: TaskPlan,
+        record: NormalizedRecord | None,
+        task_run,
+    ) -> None:
+        if task_plan.module_code != "inspection" or record is None:
+            return
+        if task_run.run_status not in {"success", "failed", "manual_required"}:
+            return
+
+        payload = dict(task_run.result_payload or {})
+        try:
+            normalized_data = dict(record.normalized_data or {})
+            stage_backfill = InspectionWorkOrderStageBackfill(self.settings)
+            refreshed_items = await stage_backfill.enrich_records(
+                [
+                    {
+                        "source_row_id": record.source_row_id,
+                        "recognition_status": record.recognition_status,
+                        "normalized_data": normalized_data,
+                    }
+                ]
+            )
+            refreshed_data = dict(refreshed_items[0].get("normalized_data") or normalized_data)
+            record.normalized_data = refreshed_data
+            stage_source = refreshed_data.get("debug_work_order_stage_source")
+            stage_name = refreshed_data.get("work_order_stage")
+            if refreshed_data.get("work_order_closed") is True:
+                refresh_status = "closed_confirmed"
+            elif stage_source in {"pts_local_chrome_profile", "pts_browser_session"} and stage_name:
+                refresh_status = "reopened_or_open"
+            else:
+                refresh_status = "pending_confirmation"
+            payload["_inspection_state_refresh"] = {
+                "status": refresh_status,
+                "error_type": None,
+                "error_message": None,
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "work_order_stage": stage_name,
+                "work_order_closed": refreshed_data.get("work_order_closed"),
+                "stage_source": stage_source,
+            }
+            self.db.add(record)
+        except Exception as exc:
+            payload["_inspection_state_refresh"] = {
+                "status": "failed",
+                "error_type": "stage_refresh_failed",
+                "error_message": f"执行后状态刷新失败: {exc}",
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        payload.setdefault("postcheck_passed", False)
+        payload.setdefault("closure_confirmed", False)
+        payload.setdefault("report_attached_confirmed", False)
+        task_run.result_payload = payload
+        self.db.add(task_run)
+        self.db.commit()
+        self.db.refresh(task_run)
 
     def _build_executor_context(self, task_plan: TaskPlan, record: NormalizedRecord) -> ExecutorContext:
         source_config = self.module_config_repo.get_source_config(task_plan.module_code)

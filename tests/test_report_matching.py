@@ -63,7 +63,7 @@ def test_missing_pdf_file_requires_manual(tmp_path: Path) -> None:
     assert result.match_strategy == "missing_files"
 
 
-def test_multiple_candidates_require_manual(tmp_path: Path) -> None:
+def test_multiple_word_candidates_are_allowed(tmp_path: Path) -> None:
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.28.docx")
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.pdf")
@@ -71,10 +71,31 @@ def test_multiple_candidates_require_manual(tmp_path: Path) -> None:
     files = InspectionReportScanner(tmp_path).scan()
     result = InspectionReportMatcher().match("南京真实客户", files)
 
-    assert result.matched is False
-    assert result.manual_required is True
-    assert result.match_strategy == "multiple_candidates"
-    assert "word" in (result.error_message or "")
+    assert result.matched is True
+    assert result.manual_required is False
+    assert result.match_strategy in {"exact", "normalized"}
+    assert len(result.matched_files["word"]) == 2
+
+
+def test_archived_word_candidates_are_ignored_when_active_file_exists(tmp_path: Path) -> None:
+    _write_file(tmp_path / "国网冀北电力有限公司电力科学研究院墨攻巡检报告(1).docx")
+    _write_file(
+        tmp_path
+        / "已上传的文档"
+        / "国网冀北电力有限公司电力科学研究院墨攻巡检报告-1775185175.docx"
+    )
+
+    files = InspectionReportScanner(tmp_path).scan()
+    result = InspectionReportMatcher(required_file_types=("word",)).match(
+        "国网冀北电力有限公司电力科学研究院",
+        files,
+    )
+
+    assert result.matched is True
+    assert result.manual_required is False
+    assert result.matched_files["word"] == [
+        str(tmp_path / "国网冀北电力有限公司电力科学研究院墨攻巡检报告(1).docx")
+    ]
 
 
 def test_prefixed_word_filename_still_matches_customer(tmp_path: Path) -> None:
@@ -86,6 +107,17 @@ def test_prefixed_word_filename_still_matches_customer(tmp_path: Path) -> None:
     assert result.matched is True
     assert result.manual_required is False
     assert result.matched_files["word"]
+
+
+def test_bracketed_customer_with_chinese_date_suffix_matches_customer(tmp_path: Path) -> None:
+    _write_file(tmp_path / "【上海科创银行】谛听巡检报告-2026年04月03日.docx")
+
+    files = InspectionReportScanner(tmp_path).scan()
+    result = InspectionReportMatcher(required_file_types=("word",)).match("上海科创银行有限公司", files)
+
+    assert result.matched is True
+    assert result.manual_required is False
+    assert result.matched_files["word"][0].endswith("【上海科创银行】谛听巡检报告-2026年04月03日.docx")
 
 
 def test_long_customer_name_matches_truncated_candidate_via_bidirectional_fuzzy(tmp_path: Path) -> None:

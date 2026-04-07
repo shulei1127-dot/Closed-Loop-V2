@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urljoin
@@ -295,13 +296,17 @@ class DingtalkPayloadFetcher:
         params = config.get_extra(f"{step}_query_params", {})
         json_body = config.get_extra(f"{step}_json_body")
         headers = self._build_headers(config, step=step)
+        headers.setdefault("Cache-Control", "no-cache")
+        headers.setdefault("Pragma", "no-cache")
         cookies = self._build_cookies(config)
         timeout = float(config.get_extra("request_timeout_seconds", self.settings.dingtalk_request_timeout_seconds))
         verify_ssl = bool(config.get_extra("verify_ssl", self.settings.dingtalk_verify_ssl))
+        request_params = dict(params) if isinstance(params, dict) else {}
+        request_params.setdefault("_ts", str(int(time.time() * 1000)))
         return {
             "url": url,
             "method": method,
-            "params": params if isinstance(params, dict) else {},
+            "params": request_params,
             "json_body": json_body if isinstance(json_body, dict) else None,
             "headers": headers,
             "cookies": cookies,

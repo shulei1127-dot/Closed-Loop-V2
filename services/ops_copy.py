@@ -39,6 +39,10 @@ ERROR_COPY = {
     "response_invalid": "外部返回异常，需排查接口返回。",
     "business_rejected": "业务条件不满足，无法自动继续。",
     "permission_denied": "权限不足，需要人工处理。",
+    "postcheck_failed": "工单动作已执行，但最终闭环校验未通过。",
+    "stage_refresh_failed": "执行后状态刷新失败，当前真实闭环状态待确认。",
+    "upload_failed": "巡检报告上传失败，未能完成自动闭环。",
+    "complete_failed": "工单阶段推进失败，未能完成自动闭环。",
     "manual_required": "需要人工介入处理。",
     "unknown_error": "发生未知异常，需要进一步排查。",
 }
@@ -64,9 +68,19 @@ def extract_error_type(
 ) -> str | None:
     payload = result_payload or {}
     diagnostics = payload.get("runner_diagnostics") or {}
+    refresh_state = payload.get("_inspection_state_refresh") or {}
     error_type = diagnostics.get("error_type")
+    failed_action = diagnostics.get("failed_action")
+    if failed_action == "upload_report_files":
+        return "upload_failed"
+    if failed_action == "complete_inspection":
+        return "complete_failed"
+    if failed_action == "postcheck_inspection_closure":
+        return "postcheck_failed"
     if error_type:
         return str(error_type)
+    if refresh_state.get("error_type"):
+        return str(refresh_state.get("error_type"))
     if manual_required or run_status == "manual_required":
         return "manual_required"
     if run_status == "precheck_failed" and diagnostics.get("config_valid") is False:

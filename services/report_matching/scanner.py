@@ -44,6 +44,7 @@ class InspectionReportScanner:
                     file_type=file_type,
                     normalized_name=normalize_filename_stem(filename, self.rules),
                     customer_name_candidate=extract_customer_name_candidate(filename, self.rules),
+                    is_archived="已上传的文档" in path.parts,
                 )
             )
         return items

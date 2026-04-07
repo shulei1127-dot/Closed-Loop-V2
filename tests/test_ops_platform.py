@@ -364,6 +364,88 @@ def test_ops_pending_inspection_keeps_simulated_runs_pending(db_session) -> None
     assert any(item.task_plan_id == str(task.id) for item in pending_items)
 
 
+def test_ops_pending_inspection_keeps_false_positive_success_pending(db_session) -> None:
+    from services.ops_service import OpsService
+
+    snapshot = SourceSnapshot(
+        module_code="inspection",
+        source_url="https://alidocs.dingtalk.com",
+        source_doc_key="inspection-doc",
+        source_view_key="inspection-view",
+        data_source="parallelv2_binary",
+        sync_status="success",
+        raw_columns=[],
+        raw_rows=[],
+        raw_meta={},
+        row_count=1,
+    )
+    db_session.add(snapshot)
+    db_session.flush()
+
+    record = NormalizedRecord(
+        snapshot_id=snapshot.id,
+        module_code="inspection",
+        source_row_id="inspection-row-false-success",
+        customer_name="国网冀北电力有限公司电力科学研究院",
+        normalized_data={
+            "customer_name": "国网冀北电力有限公司电力科学研究院",
+            "inspection_month": "2026-04",
+            "executor_name": "舒磊",
+            "inspection_done": True,
+            "work_order_link": "https://pts.chaitin.net/project/order/69143a964169b1cf477144c6",
+            "work_order_closed": False,
+        },
+        field_mapping={},
+        field_confidence={},
+        field_evidence={},
+        field_samples={},
+        unresolved_fields=[],
+        recognition_status="recognized",
+    )
+    db_session.add(record)
+    db_session.flush()
+
+    task = TaskPlan(
+        module_code="inspection",
+        normalized_record_id=record.id,
+        task_type="inspection_close",
+        eligibility=True,
+        skip_reason=None,
+        planner_version="test",
+        plan_status="planned",
+        planned_payload={"customer_name": "国网冀北电力有限公司电力科学研究院", "inspection_month": "2026-04"},
+    )
+    db_session.add(task)
+    db_session.flush()
+
+    task_run = TaskRun(
+        task_plan_id=task.id,
+        run_status="success",
+        manual_required=False,
+        result_payload={
+            "execution_mode": "real",
+            "runner_diagnostics": {"transport_mode": None},
+            "action_results": [
+                {
+                    "action": "complete_inspection",
+                    "status": "success",
+                    "http_status": 302,
+                    "final_link": "https://pts.chaitin.net/project/order/69143a964169b1cf477144c6",
+                }
+            ],
+        },
+        final_link="https://pts.chaitin.net/project/order/69143a964169b1cf477144c6",
+        error_message=None,
+        executor_version="test",
+    )
+    db_session.add(task_run)
+    db_session.commit()
+
+    ops_service = OpsService(db_session)
+    pending_items = ops_service.list_pending_tasks(module_code="inspection", month="2026-04", limit=20)
+    assert any(item.task_plan_id == str(task.id) for item in pending_items)
+
+
 def test_ops_overview_deduplicates_pending_tasks_across_repeated_syncs(client) -> None:
     first = client.post("/api/sync/run", json={"module_code": "visit", "force": False})
     assert first.status_code == 200

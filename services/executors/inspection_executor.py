@@ -321,6 +321,8 @@ class InspectionExecutor:
         precheck_summary: dict[str, Any] | None = None,
         extra_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        diagnostics = runner_diagnostics or {}
+        postcheck = diagnostics.get("postcheck") or {}
         payload = {
             "execution_mode": execution_mode,
             "customer_name": context.normalized_data.get("customer_name"),
@@ -332,7 +334,15 @@ class InspectionExecutor:
             "report_match": (match_result.model_dump() if match_result else {}),
             "real_execution_enabled": self.settings.enable_real_execution,
             "inspection_real_execution_enabled": self.settings.inspection_real_execution_enabled,
-            "runner_diagnostics": runner_diagnostics,
+            "runner_diagnostics": diagnostics,
+            "postcheck_passed": postcheck.get("postcheck_passed", False),
+            "closure_confirmed": postcheck.get("closure_confirmed", False),
+            "report_attached_confirmed": postcheck.get("report_attached_confirmed", False),
+            "postcheck_stage_after": postcheck.get("postcheck_stage_after"),
+            "postcheck_uploaded_file_ids_expected": postcheck.get("postcheck_uploaded_file_ids_expected", []),
+            "postcheck_uploaded_file_ids_found": postcheck.get("postcheck_uploaded_file_ids_found", []),
+            "postcheck_uploaded_filenames_expected": postcheck.get("postcheck_uploaded_filenames_expected", []),
+            "postcheck_uploaded_filenames_found": postcheck.get("postcheck_uploaded_filenames_found", []),
         }
         if extra_payload:
             payload.update(extra_payload)

@@ -38,6 +38,17 @@ app.include_router(web_router)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).resolve().parents[2] / "static")), name="static")
 
 
+@app.middleware("http")
+async def disable_cache_for_console_and_api(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/console") or path.startswith("/api"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @app.exception_handler(EnvironmentDependencyError)
 async def environment_dependency_error_handler(
     request: Request,

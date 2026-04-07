@@ -109,6 +109,8 @@ async def execute_pending_tasks(
 ) -> TaskBatchExecuteResponse:
     ops_service = OpsService(db)
     pending_items = ops_service.list_pending_tasks(module_code=request.module_code, limit=5000, month=request.month)
+    if request.module_code == "inspection":
+        pending_items = [item for item in pending_items if item.can_execute]
     task_ids = [uuid.UUID(item.task_plan_id) for item in pending_items]
 
     results = []

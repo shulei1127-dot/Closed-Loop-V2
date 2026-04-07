@@ -40,6 +40,11 @@ class TaskPlanDTO(BaseModel):
 class SyncRunRequest(BaseModel):
     module_code: str
     force: bool = False
+    sync_months: list[str] = Field(default_factory=list)
+
+
+class SyncRerunRequest(BaseModel):
+    sync_months: list[str] = Field(default_factory=list)
 
 
 class SyncRunResponse(BaseModel):
@@ -70,6 +75,7 @@ class SyncRunResponse(BaseModel):
         retry_count: int = 0
         retried: bool = False
         retryable: bool = False
+        sync_months: list[str] = Field(default_factory=list)
 
     snapshot: SnapshotSummary
     recognition: RecognitionStats

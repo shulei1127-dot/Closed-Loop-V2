@@ -82,12 +82,14 @@ class SyncService:
         module_code: str,
         force: bool = False,
         *,
+        sync_months: list[str] | None = None,
         trigger: str = "manual",
         allow_auto_retry: bool = True,
     ) -> SyncRunResponse:
         del force
         self.ensure_module_configs()
         get_module_definition(module_code)
+        normalized_sync_months = self._normalize_sync_months(module_code, sync_months)
         source_config = self.module_repo.get_source_config(module_code)
         if source_config is None:
             raise ResourceNotFoundError(f"module source config not found: {module_code}")
@@ -106,6 +108,7 @@ class SyncService:
                     source_config=source_config,
                     trigger=current_trigger,
                     attempt=attempt,
+                    sync_months=normalized_sync_months,
                 )
                 if not (
                     allow_auto_retry
@@ -120,6 +123,7 @@ class SyncService:
                         attempt=attempt,
                         retry_count=retry_count,
                         retryable=attempt_result["retryable"],
+                        sync_months=normalized_sync_months,
                     )
                 retry_count += 1
                 attempt += 1
@@ -218,6 +222,7 @@ class SyncService:
         source_config,
         trigger: str,
         attempt: int,
+        sync_months: list[str],
     ) -> dict[str, Any]:
         collector = COLLECTOR_REGISTRY[module_code](source_config)
         recognizer = RECOGNIZER_REGISTRY[module_code]()
@@ -227,6 +232,7 @@ class SyncService:
             "trigger": trigger,
             "attempt": attempt,
             "module_code": module_code,
+            "sync_months": sync_months,
         }
         try:
             health = collector.healthcheck()
@@ -241,6 +247,7 @@ class SyncService:
             )
             snapshot = self.snapshot_repo.create_from_collect_result(collect_result)
             recognition_result = recognizer.recognize(collect_result.raw_columns, collect_result.raw_rows)
+            recognition_result = self._filter_recognition_by_sync_months(module_code, recognition_result, sync_months)
             recognition_result = await self._enrich_recognition(module_code, recognition_result)
             record_map = self.record_repo.create_from_recognition(snapshot.id, module_code, recognition_result)
             task_plans = planner.plan(recognition_result.normalized_records)
@@ -355,6 +362,7 @@ class SyncService:
         attempt: int,
         retry_count: int,
         retryable: bool,
+        sync_months: list[str],
     ) -> SyncRunResponse:
         return SyncRunResponse(
             snapshot=SyncRunResponse.SnapshotSummary(
@@ -372,8 +380,34 @@ class SyncService:
                 retry_count=retry_count,
                 retried=retry_count > 0,
                 retryable=retryable,
+                sync_months=sync_months,
             ),
         )
+
+    @staticmethod
+    def _normalize_sync_months(module_code: str, sync_months: list[str] | None) -> list[str]:
+        if module_code != "inspection":
+            return []
+        months: list[str] = []
+        for value in sync_months or []:
+            text = str(value or "").strip()
+            if len(text) == 7 and text not in months:
+                months.append(text)
+        return months
+
+    @staticmethod
+    def _filter_recognition_by_sync_months(module_code: str, recognition_result, sync_months: list[str]):
+        if module_code != "inspection" or not sync_months:
+            return recognition_result
+        filtered_records = []
+        for item in recognition_result.normalized_records:
+            normalized_data = item.get("normalized_data", {}) if isinstance(item, dict) else {}
+            if not isinstance(normalized_data, dict):
+                continue
+            if normalized_data.get("inspection_month") in sync_months:
+                filtered_records.append(item)
+        recognition_result.normalized_records = filtered_records
+        return recognition_result
 
     @staticmethod
     def _build_recognition_stats(normalized_records: list[dict], unresolved_fields: list[str]) -> dict[str, int]:

@@ -2,6 +2,7 @@ async function postJson(url, payload) {
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    cache: "no-store",
     body: JSON.stringify(payload || {}),
   });
   const data = await response.json().catch(() => ({}));
@@ -23,22 +24,71 @@ function renderFeedback(kind, title, payload) {
 
 function scheduleRefresh(delayMs = 1200) {
   window.setTimeout(() => {
-    window.location.reload();
+    const url = new URL(window.location.href);
+    url.searchParams.set("_ts", Date.now().toString());
+    window.location.assign(url.toString());
   }, delayMs);
+}
+
+function getInspectionSyncMonths() {
+  const select = document.getElementById("inspection-sync-months");
+  if (!select) return [];
+  return Array.from(select.selectedOptions || [])
+    .map((option) => option.value.trim())
+    .filter(Boolean);
+}
+
+const prefetchedUrls = new Set();
+
+function shouldPrefetchLink(link) {
+  if (!link) return false;
+  if (link.target && link.target !== "_self") return false;
+  const href = link.getAttribute("href") || "";
+  if (!href || href.startsWith("#")) return false;
+  try {
+    const url = new URL(link.href, window.location.origin);
+    if (url.origin !== window.location.origin) return false;
+    return (
+      url.pathname === "/console"
+      || url.pathname.startsWith("/console/modules/")
+      || url.pathname.startsWith("/console/tasks")
+      || url.pathname.startsWith("/console/inspection-links")
+      || url.pathname.startsWith("/console/visit-links")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function prefetchLink(link) {
+  if (!shouldPrefetchLink(link)) return;
+  const url = new URL(link.href, window.location.origin).toString();
+  if (prefetchedUrls.has(url)) return;
+  prefetchedUrls.add(url);
+  window.fetch(url, {
+    method: "GET",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "X-Codex-Prefetch": "1" },
+  }).catch(() => {
+    prefetchedUrls.delete(url);
+  });
 }
 
 async function handleSync(button) {
   const moduleCode = button.dataset.moduleCode;
-  renderFeedback("warning", `正在同步 ${moduleCode}...`, { module_code: moduleCode });
-  const result = await postJson("/api/sync/run", { module_code: moduleCode, force: false });
+  const syncMonths = moduleCode === "inspection" ? getInspectionSyncMonths() : [];
+  renderFeedback("warning", `正在同步 ${moduleCode}...`, { module_code: moduleCode, sync_months: syncMonths });
+  const result = await postJson("/api/sync/run", { module_code: moduleCode, force: false, sync_months: syncMonths });
   renderFeedback("success", `同步完成：${moduleCode}`, result);
   scheduleRefresh();
 }
 
 async function handleSyncRerun(button) {
   const moduleCode = button.dataset.moduleCode;
-  renderFeedback("warning", `正在重跑同步 ${moduleCode}...`, { module_code: moduleCode });
-  const result = await postJson(`/api/modules/${moduleCode}/sync/rerun`, {});
+  const syncMonths = moduleCode === "inspection" ? getInspectionSyncMonths() : [];
+  renderFeedback("warning", `正在重跑同步 ${moduleCode}...`, { module_code: moduleCode, sync_months: syncMonths });
+  const result = await postJson(`/api/modules/${moduleCode}/sync/rerun`, { sync_months: syncMonths });
   renderFeedback("success", `重跑完成：${moduleCode}`, result);
   scheduleRefresh();
 }
@@ -123,6 +173,10 @@ async function handlePtsCookieUpdate(form) {
 }
 
 document.addEventListener("click", async (event) => {
+  const navLink = event.target.closest("a");
+  if (navLink && shouldPrefetchLink(navLink) && !event.defaultPrevented) {
+    document.body.classList.add("page-loading");
+  }
   const button = event.target.closest("[data-action]");
   if (!button) return;
   event.preventDefault();
@@ -168,4 +222,22 @@ document.addEventListener("submit", async (event) => {
   } catch (error) {
     renderFeedback("error", "PTS Cookie 更新失败", { error: error.message });
   }
+});
+
+document.addEventListener("mouseover", (event) => {
+  const link = event.target.closest("a");
+  if (!link) return;
+  prefetchLink(link);
+});
+
+document.addEventListener("focusin", (event) => {
+  const link = event.target.closest("a");
+  if (!link) return;
+  prefetchLink(link);
+});
+
+window.addEventListener("load", () => {
+  document
+    .querySelectorAll("nav a, .module-entry-link, .ghost-link")
+    .forEach((link) => prefetchLink(link));
 });

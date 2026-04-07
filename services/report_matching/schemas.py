@@ -19,6 +19,7 @@ class ReportFileIndexItem(BaseModel):
     file_type: str
     normalized_name: str
     customer_name_candidate: str
+    is_archived: bool = False
 
 
 class ReportMatchResult(BaseModel):

@@ -248,7 +248,11 @@ def test_console_inspection_links_page_renders_all_links(client, db_session) -> 
         task_plan_id=task.id,
         run_status="success",
         manual_required=False,
-        result_payload={"final_link": "https://pts.chaitin.net/project/order/65125a7056965446f58c2f08/completed"},
+        result_payload={
+            "execution_mode": "real",
+            "final_link": "https://pts.chaitin.net/project/order/65125a7056965446f58c2f08/completed",
+            "runner_diagnostics": {"transport_mode": "pts_browser_session"},
+        },
         final_link="https://pts.chaitin.net/project/order/65125a7056965446f58c2f08/completed",
         error_message=None,
         executor_version="test",
@@ -334,6 +338,87 @@ def test_console_inspection_links_page_excludes_simulated_success(client, db_ses
     assert module_page.status_code == 200
     assert "当月最近闭环记录" in module_page.text
 
+    page = client.get("/console/inspection-links?inspection_month=2026-04")
+    assert page.status_code == 200
+    assert "国网冀北电力有限公司电力科学研究院" not in page.text
+
+
+def test_console_inspection_links_page_excludes_legacy_false_positive_success(client, db_session) -> None:
+    snapshot = SourceSnapshot(
+        module_code="inspection",
+        source_url="https://alidocs.dingtalk.com",
+        source_doc_key="inspection-doc",
+        source_view_key="inspection-view",
+        data_source="parallelv2_binary",
+        sync_status="success",
+        raw_columns=[],
+        raw_rows=[],
+        raw_meta={},
+        row_count=1,
+    )
+    db_session.add(snapshot)
+    db_session.flush()
+
+    record = NormalizedRecord(
+        snapshot_id=snapshot.id,
+        module_code="inspection",
+        source_row_id="inspection-row-legacy-false-success",
+        customer_name="国网冀北电力有限公司电力科学研究院",
+        normalized_data={
+            "customer_name": "国网冀北电力有限公司电力科学研究院",
+            "inspection_month": "2026-04",
+            "work_order_link": "https://pts.chaitin.net/project/order/69143a964169b1cf477144c6",
+            "work_order_closed": False,
+        },
+        field_mapping={},
+        field_confidence={},
+        field_evidence={},
+        field_samples={},
+        unresolved_fields=[],
+        recognition_status="recognized",
+    )
+    db_session.add(record)
+    db_session.flush()
+
+    task = TaskPlan(
+        module_code="inspection",
+        normalized_record_id=record.id,
+        task_type="inspection_close",
+        eligibility=True,
+        skip_reason=None,
+        planner_version="test",
+        plan_status="planned",
+        planned_payload={"customer_name": "国网冀北电力有限公司电力科学研究院", "inspection_month": "2026-04"},
+    )
+    db_session.add(task)
+    db_session.flush()
+
+    task_run = TaskRun(
+        task_plan_id=task.id,
+        run_status="success",
+        manual_required=False,
+        result_payload={
+            "execution_mode": "real",
+            "final_link": None,
+            "runner_diagnostics": {"mode": "real", "transport_mode": None},
+            "action_results": [
+                {
+                    "action": "complete_inspection",
+                    "status": "success",
+                    "http_status": 302,
+                    "final_link": "https://pts.chaitin.net/project/order/69143a964169b1cf477144c6",
+                }
+            ],
+        },
+        final_link="https://pts.chaitin.net/project/order/69143a964169b1cf477144c6",
+        error_message=None,
+        executor_version="test",
+    )
+    db_session.add(task_run)
+    db_session.commit()
+
+    module_page = client.get("/console/modules/inspection?inspection_month=2026-04")
+    assert module_page.status_code == 200
     page = client.get("/console/inspection-links?inspection_month=2026-04")
     assert page.status_code == 200
     assert "国网冀北电力有限公司电力科学研究院" not in page.text

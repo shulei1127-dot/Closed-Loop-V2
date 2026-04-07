@@ -14,7 +14,7 @@ router = APIRouter()
 async def run_sync(request: SyncRunRequest, db: Session = Depends(get_db)) -> SyncRunResponse:
     service = SyncService(db)
     try:
-        return await service.run_sync(request.module_code, request.force)
+        return await service.run_sync(request.module_code, request.force, sync_months=request.sync_months)
     except OperationConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except UnsupportedModuleError as exc:

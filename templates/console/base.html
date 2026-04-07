@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ page_title }} · Closed Loop V2</title>
-  <link rel="stylesheet" href="/static/console/console.css">
+  <link rel="stylesheet" href="/static/console/console.css?v={{ static_rev }}">
 </head>
 <body>
   <div class="shell">
@@ -45,6 +45,6 @@
       {% block content %}{% endblock %}
     </main>
   </div>
-  <script src="/static/console/app.js"></script>
+  <script src="/static/console/app.js?v={{ static_rev }}"></script>
 </body>
 </html>

@@ -26,6 +26,7 @@ DEFAULT_RULES = ReportMatchingRules(
     ),
     suffix_patterns=(
         r"[-_ ]?\d{4}[.\-_]\d{1,2}[.\-_]\d{1,2}$",
+        r"[-_ ]?20\d{2}年\d{1,2}月\d{1,2}日$",
         r"[-_ ]?20\d{2}\d{2}\d{2}$",
         r"[-_ ]?v\d+$",
         r"[-_ ]?版本\d+$",

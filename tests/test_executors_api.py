@@ -1,3 +1,5 @@
+import asyncio
+
 from sqlalchemy import select
 
 from core.config import get_settings
@@ -526,6 +528,8 @@ def test_inspection_execute_returns_manual_required_without_reports(client, db_s
 def test_inspection_execute_requires_real_execution_with_reports(client, db_session, monkeypatch, tmp_path) -> None:
     _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
     monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "false")
+    monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "false")
     get_settings.cache_clear()
     _run_sync(client, "inspection")
     task = _get_planned_task(db_session, "inspection")
@@ -557,6 +561,9 @@ def test_inspection_precheck_fails_when_real_execution_enabled_but_config_missin
     monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "true")
     monkeypatch.delenv("INSPECTION_REAL_BASE_URL", raising=False)
     monkeypatch.delenv("INSPECTION_REAL_TOKEN", raising=False)
+    monkeypatch.setenv("PTS_COOKIE_HEADER", "")
+    from services.executors.inspection_real_runner import InspectionRealRunner
+    monkeypatch.setattr(InspectionRealRunner, "_browser_session_available", lambda self: False)
     get_settings.cache_clear()
     _run_sync(client, "inspection")
     task = _get_planned_task(db_session, "inspection")
@@ -568,7 +575,92 @@ def test_inspection_precheck_fails_when_real_execution_enabled_but_config_missin
     assert payload["run_status"] == "precheck_failed"
     assert payload["result_payload"]["execution_mode"] == "real_precheck"
     assert payload["result_payload"]["runner_diagnostics"]["config_valid"] is False
-    assert "inspection_real_base_url" in payload["result_payload"]["runner_diagnostics"]["missing_fields"]
+    assert "pts_cookie_header" in payload["result_payload"]["runner_diagnostics"]["missing_fields"]
+    get_settings.cache_clear()
+
+
+def test_inspection_execute_prefers_browser_session_mode_when_available(
+    client,
+    db_session,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _write_file(tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx")
+    monkeypatch.setenv("INSPECTION_REPORT_ROOT", str(tmp_path))
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
+    monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("INSPECTION_REAL_BASE_URL", "https://legacy.example.com")
+    monkeypatch.setenv("INSPECTION_REAL_TOKEN", "legacy-token")
+    monkeypatch.setenv("PTS_BASE_URL", "https://pts.example.com")
+    monkeypatch.setenv("PTS_COOKIE_HEADER", "session=inspection-real-cookie")
+
+    from services.executors.inspection_real_runner import InspectionRealRunOutcome, InspectionRealRunner
+
+    monkeypatch.setattr(InspectionRealRunner, "_browser_session_available", lambda self: True)
+
+    async def fake_browser_run(self, context, report_match, diagnostics):
+        diagnostics["transport_mode"] = "pts_browser_session"
+        diagnostics["config_valid"] = True
+        return InspectionRealRunOutcome(
+            run_status="success",
+            final_link="https://pts.example.com/project/order/browser-mode",
+            action_results=[{"action": "complete_inspection", "status": "success", "http_status": 200}],
+            runner_diagnostics=diagnostics,
+        )
+
+    monkeypatch.setattr(InspectionRealRunner, "_run_pts_browser_mode", fake_browser_run)
+    get_settings.cache_clear()
+    _run_sync(client, "inspection")
+    task = _get_planned_task(db_session, "inspection")
+
+    response = client.post(f"/api/tasks/{task.id}/execute", json={"dry_run": False})
+    assert response.status_code == 200
+    payload = response.json()["item"]
+
+    assert payload["run_status"] == "success"
+    assert payload["result_payload"]["runner_diagnostics"]["transport_mode"] == "pts_browser_session"
+    assert payload["final_link"].endswith("/browser-mode")
+    get_settings.cache_clear()
+
+
+def test_inspection_browser_upload_reports_uses_browser_session(monkeypatch, tmp_path) -> None:
+    from services.executors.inspection_real_runner import InspectionRealRunner
+
+    report = tmp_path / "南京真实客户雷池巡检报告-2026.03.27.docx"
+    _write_file(report)
+    monkeypatch.setenv("PTS_BASE_URL", "https://pts.example.com")
+    monkeypatch.setenv("PTS_COOKIE_HEADER", "session=inspection-real-cookie")
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
+    monkeypatch.setenv("INSPECTION_REAL_EXECUTION_ENABLED", "true")
+    monkeypatch.delenv("INSPECTION_REAL_BASE_URL", raising=False)
+    monkeypatch.delenv("INSPECTION_REAL_TOKEN", raising=False)
+    get_settings.cache_clear()
+
+    class FakeBrowser:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def execute_js(self, script: str):
+            self.calls.append(script)
+            return {"status": 200, "url": "https://pts.example.com/api/upload", "text": '{"id":"file-1","filename":"report.docx"}'}
+
+    browser = FakeBrowser()
+    runner = InspectionRealRunner(get_settings())
+    match_result = type(
+        "MatchResult",
+        (),
+        {
+            "matched_files": {"word": [str(report)]},
+        },
+    )()
+
+    result = asyncio.run(runner._pts_upload_reports(browser, match_result))
+
+    assert result["status"] == "success"
+    assert result["uploaded_file_ids"] == ["file-1"]
+    assert result["uploaded_word_files"] == [str(report)]
+    assert browser.calls
+    assert 'xhr.open("POST", "/api/upload", false);' in browser.calls[0]
     get_settings.cache_clear()
 
 
@@ -590,6 +682,8 @@ def test_inspection_execute_runs_real_runner_successfully(
     monkeypatch.setenv("INSPECTION_REAL_UPLOAD_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/upload-reports")
     monkeypatch.setenv("INSPECTION_REAL_COMPLETE_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/complete")
     monkeypatch.setenv("INSPECTION_REAL_FINAL_LINK_PATH", "data.final_link")
+    from services.executors.inspection_real_runner import InspectionRealRunner
+    monkeypatch.setattr(InspectionRealRunner, "_browser_session_available", lambda self: False)
     get_settings.cache_clear()
     _run_sync(client, "inspection")
     task = _get_planned_task(db_session, "inspection")
@@ -642,6 +736,8 @@ def test_inspection_execute_upload_failure_records_diagnostics(
     monkeypatch.setenv("INSPECTION_REAL_UPLOAD_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/upload-reports-fail")
     monkeypatch.setenv("INSPECTION_REAL_COMPLETE_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/complete")
     monkeypatch.setenv("INSPECTION_REAL_FINAL_LINK_PATH", "data.final_link")
+    from services.executors.inspection_real_runner import InspectionRealRunner
+    monkeypatch.setattr(InspectionRealRunner, "_browser_session_available", lambda self: False)
     get_settings.cache_clear()
     _run_sync(client, "inspection")
     task = _get_planned_task(db_session, "inspection")
@@ -684,6 +780,8 @@ def test_inspection_execute_assign_owner_add_member_then_success(
     monkeypatch.setenv("INSPECTION_REAL_UPLOAD_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/upload-reports")
     monkeypatch.setenv("INSPECTION_REAL_COMPLETE_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/complete")
     monkeypatch.setenv("INSPECTION_REAL_FINAL_LINK_PATH", "data.final_link")
+    from services.executors.inspection_real_runner import InspectionRealRunner
+    monkeypatch.setattr(InspectionRealRunner, "_browser_session_available", lambda self: False)
     get_settings.cache_clear()
     _run_sync(client, "inspection")
     task = _get_planned_task(db_session, "inspection")
@@ -734,6 +832,8 @@ def test_inspection_execute_permission_denied_returns_manual_required(
     monkeypatch.setenv("INSPECTION_REAL_UPLOAD_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/upload-reports")
     monkeypatch.setenv("INSPECTION_REAL_COMPLETE_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/complete")
     monkeypatch.setenv("INSPECTION_REAL_FINAL_LINK_PATH", "data.final_link")
+    from services.executors.inspection_real_runner import InspectionRealRunner
+    monkeypatch.setattr(InspectionRealRunner, "_browser_session_available", lambda self: False)
     get_settings.cache_clear()
     _run_sync(client, "inspection")
     task = _get_planned_task(db_session, "inspection")

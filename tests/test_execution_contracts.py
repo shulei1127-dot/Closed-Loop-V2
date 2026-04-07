@@ -5,6 +5,7 @@ from sqlalchemy import select
 from core.config import get_settings
 from models.normalized_record import NormalizedRecord
 from models.task_plan import TaskPlan
+from services.executors.inspection_real_runner import InspectionRealRunner
 from services.executors.visit_real_runner import VisitRealRunner
 
 
@@ -72,7 +73,7 @@ def test_execution_contract_simulated_payloads_are_uniform(client, db_session, m
     monkeypatch.setenv("PROACTIVE_REAL_EXECUTION_ENABLED", "false")
     get_settings.cache_clear()
 
-    for module_code in ("visit", "inspection", "proactive"):
+    for module_code in ("visit", "proactive"):
         _run_sync(client, module_code)
         task = _get_planned_task(db_session, module_code)
         response = client.post(f"/api/tasks/{task.id}/execute", json={"dry_run": False})
@@ -88,6 +89,15 @@ def test_execution_contract_simulated_payloads_are_uniform(client, db_session, m
         assert diagnostics["failed_action"] is None
         assert diagnostics["last_error"] is None
         assert diagnostics["error_type"] is None
+
+    _run_sync(client, "inspection")
+    inspection_task = _get_planned_task(db_session, "inspection")
+    inspection_response = client.post(f"/api/tasks/{inspection_task.id}/execute", json={"dry_run": False})
+    assert inspection_response.status_code == 200
+    inspection_payload = inspection_response.json()["item"]
+    assert inspection_payload["run_status"] == "precheck_failed"
+    _assert_result_contract(inspection_payload, expected_mode="real_precheck", module_code="inspection")
+    assert inspection_payload["result_payload"]["runner_diagnostics"]["mode"] == "simulated"
 
     get_settings.cache_clear()
 
@@ -118,8 +128,9 @@ def test_execution_contract_precheck_failed_config_payloads_are_uniform(
             "prepare": lambda: (
                 monkeypatch.delenv("INSPECTION_REAL_BASE_URL", raising=False),
                 monkeypatch.delenv("INSPECTION_REAL_TOKEN", raising=False),
+                monkeypatch.setenv("PTS_COOKIE_HEADER", ""),
             ),
-            "missing_field": "inspection_real_base_url",
+            "missing_field": "pts_cookie_header",
         },
         "proactive": {
             "enable_env": "PROACTIVE_REAL_EXECUTION_ENABLED",
@@ -190,6 +201,7 @@ def test_execution_contract_real_success_payloads_are_uniform(
     monkeypatch.setenv("INSPECTION_REAL_UPLOAD_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/upload-reports")
     monkeypatch.setenv("INSPECTION_REAL_COMPLETE_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/complete")
     monkeypatch.setenv("INSPECTION_REAL_FINAL_LINK_PATH", "data.final_link")
+    monkeypatch.setattr(InspectionRealRunner, "_browser_session_available", lambda self: False)
 
     monkeypatch.setenv("PROACTIVE_REAL_EXECUTION_ENABLED", "true")
     monkeypatch.setenv("PROACTIVE_REAL_BASE_URL", proactive_real_server["base_url"])
@@ -279,6 +291,7 @@ def test_execution_contract_retryable_http_failures_are_uniform(
     monkeypatch.setenv("INSPECTION_REAL_UPLOAD_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/upload-reports-fail")
     monkeypatch.setenv("INSPECTION_REAL_COMPLETE_ENDPOINT_TEMPLATE", "/inspection-work-orders/{work_order_id}/complete")
     monkeypatch.setenv("INSPECTION_REAL_FINAL_LINK_PATH", "data.final_link")
+    monkeypatch.setattr(InspectionRealRunner, "_browser_session_available", lambda self: False)
 
     monkeypatch.setenv("PROACTIVE_REAL_EXECUTION_ENABLED", "true")
     monkeypatch.setenv("PROACTIVE_REAL_BASE_URL", proactive_real_server["base_url"])

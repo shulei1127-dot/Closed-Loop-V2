@@ -75,11 +75,26 @@ class InspectionReportMatcher:
         confidence: float,
     ) -> ReportMatchResult:
         candidates = self._dedupe_copy_candidates(candidates)
-        grouped: dict[str, list[str]] = {"word": [], "pdf": []}
+        grouped_items: dict[str, list[ReportFileIndexItem]] = {"word": [], "pdf": []}
         for item in candidates:
-            grouped.setdefault(item.file_type, []).append(item.path)
+            grouped_items.setdefault(item.file_type, []).append(item)
 
-        conflicts = [file_type for file_type, items in grouped.items() if len(items) > 1]
+        grouped_items = {
+            file_type: self._prefer_active_candidates(items)
+            for file_type, items in grouped_items.items()
+            if items
+        }
+
+        grouped: dict[str, list[str]] = {
+            file_type: [item.path for item in items]
+            for file_type, items in grouped_items.items()
+        }
+
+        conflicts = [
+            file_type
+            for file_type, items in grouped.items()
+            if len(items) > 1 and file_type != "word"
+        ]
         missing = [file_type for file_type in self.required_file_types if not grouped.get(file_type)]
 
         if conflicts:
@@ -130,3 +145,9 @@ class InspectionReportMatcher:
             if "(1)" in existing.filename and "(1)" not in item.filename:
                 deduped[key] = item
         return list(deduped.values())
+
+    @staticmethod
+    def _prefer_active_candidates(candidates: list[ReportFileIndexItem]) -> list[ReportFileIndexItem]:
+        active_candidates = [item for item in candidates if not item.is_archived]
+        preferred = active_candidates or candidates
+        return sorted(preferred, key=lambda item: item.path)

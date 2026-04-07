@@ -185,13 +185,17 @@ class _PtsBrowserSession:
         }
 
     async def graphql(self, query: str) -> dict[str, Any]:
+        return await self.graphql_payload({"query": query})
+
+    async def graphql_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        encoded_payload = json.dumps(payload, ensure_ascii=False)
         js = (
             "var xhr=new XMLHttpRequest();"
             "xhr.open('POST','/query',false);"
             "xhr.withCredentials=true;"
             "xhr.setRequestHeader('Content-Type','application/json');"
             "xhr.setRequestHeader('Accept','*/*');"
-            f"try{{xhr.send(JSON.stringify({{query:{json.dumps(query)}}}));"
+            f"try{{xhr.send({json.dumps(encoded_payload, ensure_ascii=False)});"
             "JSON.stringify({status:xhr.status,responseURL:(xhr.responseURL||''),text:xhr.responseText,url:window.location.href});}"
             "catch(e){JSON.stringify({status:0,error:String(e),url:window.location.href});}"
         )

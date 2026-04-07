@@ -27,6 +27,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.filters["to_pretty_json"] = lambda value: json.dumps(value or {}, ensure_ascii=False, indent=2)
+templates.env.globals["static_rev"] = str(int((BASE_DIR / "static" / "console" / "app.js").stat().st_mtime))
 
 
 def _format_local_datetime(value) -> str:
@@ -45,12 +46,6 @@ def _format_local_datetime(value) -> str:
 templates.env.filters["fmt_dt"] = _format_local_datetime
 
 router = APIRouter()
-
-
-def _module_summary_map(db: Session) -> dict[str, dict]:
-    ops_service = OpsService(db)
-    return {item.module_code: item.model_dump() for item in ops_service.build_overview()}
-
 
 @router.get("/", response_class=HTMLResponse)
 def root() -> RedirectResponse:
@@ -94,12 +89,13 @@ def console_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLRe
 @router.get("/console/modules/visit", response_class=HTMLResponse)
 def console_visit_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     ops_service = OpsService(db)
+    module_summary_map = {item.module_code: item.model_dump() for item in ops_service.build_overview()}
     return templates.TemplateResponse(
         name="console/module_visit.html",
         request=request,
         context={
             "page_title": "交付转售后回访",
-            "module_summary": _module_summary_map(db).get("visit"),
+            "module_summary": module_summary_map.get("visit"),
             "pending_visit_items": [item.model_dump() for item in ops_service.list_pending_tasks(module_code="visit", limit=100)],
             "recent_visit_links": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=20)],
             "active_nav": "module_visit",
@@ -110,8 +106,12 @@ def console_visit_module(request: Request, db: Session = Depends(get_db)) -> HTM
 @router.get("/console/modules/inspection", response_class=HTMLResponse)
 def console_inspection_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     ops_service = OpsService(db)
+    module_summary_map = {item.module_code: item.model_dump() for item in ops_service.build_overview()}
     inspection_month = request.query_params.get("inspection_month") or datetime.now(LOCAL_TZ).strftime("%Y-%m")
     available_inspection_months = ops_service.list_pending_inspection_months()
+    available_sync_months = ops_service.list_known_inspection_months()
+    if inspection_month not in available_sync_months:
+        available_sync_months = sorted({*available_sync_months, inspection_month}, reverse=True)
     if inspection_month not in available_inspection_months and available_inspection_months:
         inspection_month = available_inspection_months[0]
     return templates.TemplateResponse(
@@ -119,13 +119,14 @@ def console_inspection_module(request: Request, db: Session = Depends(get_db)) -
         request=request,
         context={
             "page_title": "巡检工单闭环",
-            "module_summary": _module_summary_map(db).get("inspection"),
+            "module_summary": module_summary_map.get("inspection"),
             "pending_inspection_items": [
                 item.model_dump()
                 for item in ops_service.list_pending_tasks(module_code="inspection", limit=100, month=inspection_month)
             ],
             "inspection_month": inspection_month,
             "available_inspection_months": available_inspection_months,
+            "available_sync_months": available_sync_months,
             "recent_inspection_closures": [
                 item.model_dump()
                 for item in ops_service.list_recent_inspection_closures(month=inspection_month, limit=10)
@@ -138,12 +139,13 @@ def console_inspection_module(request: Request, db: Session = Depends(get_db)) -
 @router.get("/console/modules/proactive", response_class=HTMLResponse)
 def console_proactive_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     ops_service = OpsService(db)
+    module_summary_map = {item.module_code: item.model_dump() for item in ops_service.build_overview()}
     return templates.TemplateResponse(
         name="console/module_proactive.html",
         request=request,
         context={
             "page_title": "超半年主动回访",
-            "module_summary": _module_summary_map(db).get("proactive"),
+            "module_summary": module_summary_map.get("proactive"),
             "pending_proactive_items": [
                 item.model_dump() for item in ops_service.list_pending_tasks(module_code="proactive", limit=100)
             ],

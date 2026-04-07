@@ -72,6 +72,10 @@ class PendingTaskItem(BaseModel):
     latest_run_status_label: str | None = None
     latest_run_time: datetime | None = None
     business_explanation: str | None = None
+    state_code: str | None = None
+    state_label: str | None = None
+    state_tone: str | None = None
+    can_execute: bool = True
     detail_url: str | None = None
 
 
