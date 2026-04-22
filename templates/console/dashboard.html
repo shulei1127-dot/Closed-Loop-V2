@@ -1,12 +1,13 @@
 {% extends "console/base.html" %}
 
 {% block content %}
+<div id="dashboard-view-meta" data-inspection-month="{{ inspection_month }}"></div>
 <section class="section">
   <div class="panel">
     <div class="section-head">
       <div>
         <h3>PTS 会话</h3>
-        <p>Cookie 只经过前端提交到后端，本页面不会回显已保存原文。</p>
+        <p>支持手动粘贴 Cookie，也支持通过本机浏览器扩展自动接入当前已登录的 PTS 会话。</p>
       </div>
       <div class="session-status-group">
         <span id="pts-session-badge" class="badge status-{{ 'success' if pts_session_status.configured else 'warning' }}">
@@ -25,6 +26,28 @@
         <span class="muted">仅保存到后端本地 `.env`，不在前端持久化。</span>
       </div>
     </form>
+    <div class="inline-actions" style="margin-top: 12px;">
+      <span id="pts-extension-badge" class="badge status-unknown">浏览器扩展未连接</span>
+      <span id="pts-extension-detail" class="muted">如果你已安装浏览器扩展，请把扩展服务地址改成当前 Closed Loop V2 地址，再点击扩展里的 PTS 采集。</span>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <h3>模块健康检查</h3>
+      <span id="dashboard-health-badge" class="badge status-unknown">加载中</span>
+    </div>
+    <p id="dashboard-health-summary" class="muted">正在检查平台模块健康状态...</p>
+    <div id="dashboard-health-grid" class="health-grid">
+      <article class="health-card">
+        <h4>加载中</h4>
+        <p class="muted">正在获取模块健康信息...</p>
+      </article>
+    </div>
+    <p id="dashboard-health-error" class="muted" hidden></p>
+    <button id="dashboard-health-retry" class="action-button secondary" type="button" hidden>重试健康检查</button>
   </div>
 </section>
 
@@ -33,52 +56,20 @@
     <h3>模块总览</h3>
     <p>查看最近同步、执行、失败与人工处理状态，并支持手动同步和重跑。</p>
   </div>
-  <div class="module-grid">
-    {% for item in module_summaries %}
+  <p id="dashboard-summary-meta" class="muted">数据时间：加载中...</p>
+  <p id="dashboard-summary-error" class="muted" hidden></p>
+  <button id="dashboard-summary-retry" class="action-button secondary" type="button" hidden>重试加载模块总览</button>
+  <div id="dashboard-summary-grid" class="module-grid">
     <article class="card module-card">
       <div class="card-head">
         <div>
-          <h4>{{ item.module_name }}</h4>
-          <p class="muted">{{ item.module_code }}</p>
+          <h4>加载中</h4>
+          <p class="muted">module</p>
         </div>
-        <span class="badge status-{{ item.latest_sync_status or 'unknown' }}">{{ item.latest_sync_status_label or '未同步' }}</span>
+        <span class="badge status-unknown">加载中</span>
       </div>
-      <dl class="stats">
-        <div><dt>最近同步</dt><dd>{{ item.latest_snapshot_time | fmt_dt }}</dd></div>
-        <div><dt>最近执行</dt><dd>{{ item.latest_execute_status_label or '暂无' }}</dd></div>
-        <div><dt>记录数</dt><dd>{{ item.row_count }}</dd></div>
-        <div><dt>待执行</dt><dd>{{ item.planned_tasks }}</dd></div>
-        <div><dt>已跳过</dt><dd>{{ item.skipped_tasks }}</dd></div>
-        <div><dt>需人工处理</dt><dd>{{ item.manual_required_count }}</dd></div>
-        <div><dt>失败任务</dt><dd>{{ item.failed_task_count }}</dd></div>
-        <div><dt>可重试</dt><dd>{{ item.retryable_task_count }}</dd></div>
-        <div><dt>调度</dt><dd>{{ item.schedule_type ~ ':' ~ item.schedule_value if item.schedule_enabled else '未配置' }}</dd></div>
-        <div><dt>运行中</dt><dd>{{ '是' if item.sync_running else '否' }}</dd></div>
-      </dl>
-      {% if item.latest_execute_explanation %}
-      <p class="ops-note">{{ item.latest_execute_explanation }}</p>
-      {% endif %}
-      <div class="card-actions">
-        <button
-          class="action-button"
-          data-action="sync"
-          data-module-code="{{ item.module_code }}"
-        >
-          立即同步
-        </button>
-        <button
-          class="action-button secondary"
-          data-action="rerun-sync"
-          data-module-code="{{ item.module_code }}"
-        >
-          重跑同步
-        </button>
-        <a class="module-entry-link" href="/console/modules/{{ item.module_code }}">进入模块</a>
-        <a href="/console/snapshots?module_code={{ item.module_code }}">查看快照</a>
-        <a href="/console/tasks?module_code={{ item.module_code }}">查看任务</a>
-      </div>
+      <p class="muted">正在加载模块总览数据...</p>
     </article>
-    {% endfor %}
   </div>
 </section>
 
@@ -234,32 +225,20 @@
   <div class="two-column">
     <div class="panel">
       <h4>失败任务</h4>
-      {% if failure_items %}
-      <ul class="run-list">
-        {% for item in failure_items %}
-        <li>
-          <strong>{{ item.module_code }}</strong>
-          <span class="badge status-{{ item.status_tone }}">{{ item.display_status }}</span>
-          <span>{{ item.customer_name or item.title }}</span>
-          <span class="muted">{{ item.business_explanation }}</span>
-          {% if item.retryable %}<span class="badge status-warning">可重试</span>{% endif %}
-          {% if item.task_plan_id %}
-          <a href="{{ item.detail_url }}">查看详情</a>
-          <button class="action-button secondary" data-action="rerun-task" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">重跑任务</button>
-          {% elif item.module_code %}
-          <button class="action-button secondary" data-action="rerun-sync" data-module-code="{{ item.module_code }}">重跑同步</button>
-          {% endif %}
-        </li>
-        {% endfor %}
+      <p id="dashboard-failures-meta" class="muted">数据时间：加载中...</p>
+      <p id="dashboard-failures-error" class="muted" hidden></p>
+      <button id="dashboard-failures-retry" class="action-button secondary" type="button" hidden>重试加载失败任务</button>
+      <ul id="dashboard-failures-list" class="run-list">
+        <li class="muted">加载中...</li>
       </ul>
-      {% else %}
-      <p class="muted">当前没有失败项。</p>
-      {% endif %}
+      <p id="dashboard-failures-empty" class="muted" hidden>当前没有失败项。</p>
     </div>
     <div class="panel">
       <h4>人工处理清单</h4>
-      {% if manual_required_items %}
-      <table class="data-table compact-table">
+      <p id="dashboard-manual-meta" class="muted">数据时间：加载中...</p>
+      <p id="dashboard-manual-error" class="muted" hidden></p>
+      <button id="dashboard-manual-retry" class="action-button secondary" type="button" hidden>重试加载人工处理清单</button>
+      <table id="dashboard-manual-table" class="data-table compact-table">
         <thead>
           <tr>
             <th>模块</th>
@@ -271,28 +250,11 @@
             <th>操作</th>
           </tr>
         </thead>
-        <tbody>
-          {% for item in manual_required_items %}
-          <tr>
-            <td>{{ item.module_code }}</td>
-            <td>{{ item.customer_name or '未知客户' }}</td>
-            <td>{{ item.task_plan_id }}</td>
-            <td><span class="badge status-{{ item.status_tone }}">{{ item.display_status }}</span></td>
-            <td>{{ item.business_explanation }}</td>
-            <td>{{ item.occurred_at | fmt_dt }}</td>
-            <td>
-              {% if item.detail_url %}<a href="{{ item.detail_url }}">查看详情</a>{% endif %}
-              {% if item.task_plan_id %}
-              <button class="action-button secondary" data-action="rerun-task" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">重跑</button>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
+        <tbody id="dashboard-manual-tbody">
+          <tr><td colspan="7" class="muted">加载中...</td></tr>
         </tbody>
       </table>
-      {% else %}
-      <p class="muted">当前没有人工处理项。</p>
-      {% endif %}
+      <p id="dashboard-manual-empty" class="muted" hidden>当前没有人工处理项。</p>
     </div>
   </div>
 </section>

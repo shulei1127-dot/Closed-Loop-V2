@@ -73,8 +73,17 @@ class ConfiguredCollectorBase:
             if not has_payload:
                 raise ValueError(f"{self.module_label} fixture collector requires at least one payload source")
         if self.config.collector_type in {"dingtalk", "real"}:
-            if not self.config.get_extra("structured_endpoint") and not self.config.get_extra("state_endpoint"):
-                raise ValueError(f"{self.module_label} real transport requires structured_endpoint or state_endpoint")
+            has_structured_endpoint = bool(self.config.get_extra("structured_endpoint"))
+            has_state_endpoint = bool(self.config.get_extra("state_endpoint"))
+            has_direct_parallelv2 = bool(
+                self.config.get_extra("parallelv2_direct_access_token_enabled")
+                and self.config.get_extra("parallelv2_endpoint")
+            )
+            if not has_structured_endpoint and not has_state_endpoint and not has_direct_parallelv2:
+                raise ValueError(
+                    f"{self.module_label} real transport requires structured_endpoint, state_endpoint, "
+                    "or direct parallelv2 configuration"
+                )
 
     def healthcheck(self) -> dict[str, Any]:
         return {

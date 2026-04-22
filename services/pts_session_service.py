@@ -21,11 +21,20 @@ class PtsSessionService:
         return {
             "configured": bool(values.get("PTS_COOKIE_HEADER")),
             "base_url": values.get("PTS_BASE_URL") or get_settings().pts_base_url,
-            "source": "env_file",
+            "source": values.get("PTS_AUTH_SOURCE") or "env_file",
             "updated_at": updated_at,
         }
 
     def update_cookie(self, cookie_header: str) -> dict:
+        return self.update_auth_bundle(cookie_header=cookie_header, source="manual_input")
+
+    def update_auth_bundle(
+        self,
+        *,
+        cookie_header: str,
+        source: str = "env_file",
+        pts_username: str | None = None,
+    ) -> dict:
         cookie = cookie_header.strip()
         if not cookie:
             raise ValueError("PTS Cookie 不能为空")
@@ -36,23 +45,32 @@ class PtsSessionService:
         if self.env_path.exists():
             lines = self.env_path.read_text(encoding="utf-8").splitlines()
 
-        updated = False
-        for index, line in enumerate(lines):
-            if line.startswith("PTS_COOKIE_HEADER="):
-                lines[index] = f"PTS_COOKIE_HEADER={cookie}"
-                updated = True
-                break
-
-        if not updated:
-            if lines and lines[-1] != "":
-                lines.append("")
-            lines.append(f"PTS_COOKIE_HEADER={cookie}")
+        lines = self._upsert_env_line(lines, "PTS_COOKIE_HEADER", cookie)
+        lines = self._upsert_env_line(lines, "PTS_AUTH_SOURCE", str(source or "env_file").strip() or "env_file")
+        if pts_username and pts_username.strip():
+            lines = self._upsert_env_line(lines, "PTS_USERNAME_HINT", pts_username.strip())
 
         self.env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         get_settings.cache_clear()
         status = self.get_status()
-        status["message"] = "PTS Cookie 已更新"
+        status["message"] = "PTS 会话已更新"
         return status
+
+    def _upsert_env_line(self, lines: list[str], key: str, value: str) -> list[str]:
+        updated = False
+        new_lines = list(lines)
+        for index, line in enumerate(new_lines):
+            if line.startswith(f"{key}="):
+                new_lines[index] = f"{key}={value}"
+                updated = True
+                break
+
+        if not updated:
+            if new_lines and new_lines[-1] != "":
+                new_lines.append("")
+            new_lines.append(f"{key}={value}")
+
+        return new_lines
 
     def _read_env_values(self) -> dict[str, str]:
         if not self.env_path.exists():

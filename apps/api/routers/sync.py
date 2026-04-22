@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from core.db import get_db
 from core.exceptions import OperationConflictError, UnsupportedModuleError
 from schemas.sync import SyncRunRequest, SyncRunResponse
+from services.ops_service import clear_ops_read_cache
 from services.sync_service import SyncService
 
 
@@ -14,7 +15,9 @@ router = APIRouter()
 async def run_sync(request: SyncRunRequest, db: Session = Depends(get_db)) -> SyncRunResponse:
     service = SyncService(db)
     try:
-        return await service.run_sync(request.module_code, request.force, sync_months=request.sync_months)
+        response = await service.run_sync(request.module_code, request.force, sync_months=request.sync_months)
+        clear_ops_read_cache(module_code=request.module_code)
+        return response
     except OperationConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except UnsupportedModuleError as exc:

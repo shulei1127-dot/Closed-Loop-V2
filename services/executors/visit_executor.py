@@ -39,7 +39,7 @@ class VisitExecutor:
                 payload={"missing_fields": missing_fields},
             )
 
-        if data.get("visit_status") != "已回访":
+        if not _is_completed_visit_status(data.get("visit_status")):
             return self._precheck_failed("visit_status 不是已回访，禁止执行", context)
         if data.get("visit_link"):
             return self._precheck_failed("visit_link 已存在，禁止重复执行", context)
@@ -316,3 +316,8 @@ class VisitExecutor:
             "postcheck_error_message": postcheck.get("error_message"),
             "final_link": diagnostics.get("final_link"),
         }
+
+
+def _is_completed_visit_status(value: Any) -> bool:
+    text = str(value or "").strip()
+    return text in {"已回访", "khlT6gz2Ab"}

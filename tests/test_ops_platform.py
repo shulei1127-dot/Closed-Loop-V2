@@ -17,6 +17,7 @@ from models.source_snapshot import SourceSnapshot
 from models.task_plan import TaskPlan
 from models.task_run import TaskRun
 from scheduler.jobs import register_jobs, run_scheduled_sync_job
+from services.browser_extension_auth_service import BrowserExtensionAuthService
 from services.environment_check import EnvironmentCheckService
 from services.collectors.visit_collector import VisitCollector
 from services.executors.schemas import ExecutionResult
@@ -221,15 +222,14 @@ def test_ops_api_and_console_render_failure_and_manual_required(client, db_sessi
     client.post("/api/sync/run", json={"module_code": "visit", "force": False})
     client.post("/api/sync/run", json={"module_code": "proactive", "force": False})
 
-    proactive_task = _get_planned_task(db_session, "proactive")
-    proactive_record = db_session.get(NormalizedRecord, proactive_task.normalized_record_id)
-    assert proactive_record is not None
-    proactive_data = dict(proactive_record.normalized_data)
-    proactive_data["contact_name"] = None
-    proactive_data["contact_phone"] = None
-    proactive_record.normalized_data = proactive_data
+    visit_task = _get_planned_task(db_session, "visit")
+    visit_record = db_session.get(NormalizedRecord, visit_task.normalized_record_id)
+    assert visit_record is not None
+    visit_data = dict(visit_record.normalized_data)
+    visit_data["visit_type"] = "未知回访类型"
+    visit_record.normalized_data = visit_data
     db_session.commit()
-    client.post(f"/api/tasks/{proactive_task.id}/execute", json={"dry_run": False})
+    client.post(f"/api/tasks/{visit_task.id}/execute", json={"dry_run": False})
 
     db_session.add(
         SourceSnapshot(
@@ -260,7 +260,7 @@ def test_ops_api_and_console_render_failure_and_manual_required(client, db_sessi
     failure_items = failures.json()["items"]
     manual_items = manual_required.json()["items"]
     assert any(item["module_code"] == "inspection" for item in failure_items)
-    assert any(item["module_code"] == "proactive" for item in manual_items)
+    assert any(item["module_code"] == "visit" for item in manual_items)
     assert any(item["display_status"] == "失败" for item in failure_items)
     assert any(item["business_explanation"] for item in failure_items)
     assert any(item["display_status"] == "需人工处理" for item in manual_items)
@@ -588,8 +588,65 @@ def test_pts_session_api_updates_local_env(client, monkeypatch, tmp_path: Path) 
     assert update.status_code == 200
     payload = update.json()
     assert payload["configured"] is True
-    assert payload["message"] == "PTS Cookie 已更新"
+    assert payload["message"] == "PTS 会话已更新"
     assert "session=fake-pts-cookie" in env_path.read_text(encoding="utf-8")
 
     refreshed = PtsSessionService(env_path=env_path).get_status()
     assert refreshed["configured"] is True
+
+
+def test_extension_collect_auth_updates_pts_session_from_sources(client, monkeypatch, tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("PTS_BASE_URL=https://pts.chaitin.net\nPTS_COOKIE_HEADER=\nPTS_VERIFY_SSL=true\n", encoding="utf-8")
+    monkeypatch.setattr("services.pts_session_service.DEFAULT_ENV_PATH", env_path)
+    service = BrowserExtensionAuthService(PtsSessionService(env_path=env_path))
+    monkeypatch.setattr("apps.api.routers.extension.BrowserExtensionAuthService", lambda: service)
+
+    ping = client.post("/extension/ping", json={"reason": "collect:pts_only", "extension_version": "1.0.0"})
+    assert ping.status_code == 200
+
+    payload = {
+        "scope": "pts_only",
+        "sources": {
+            "browser": {"userAgent": "Mozilla/5.0"},
+            "pts": {
+                "cookies": [
+                    {"name": "c", "value": "pts-cookie-c"},
+                    {"name": "_ct_auth", "value": "aaa.eyJzdWIiOiJwdHMtdXNlci0xMjMifQ.bbb"},
+                ],
+                "tabState": {
+                    "found": True,
+                    "cookie": "c=pts-cookie-c; _ct_auth=aaa.eyJzdWIiOiJwdHMtdXNlci0xMjMifQ.bbb",
+                    "userAgent": "Mozilla/5.0",
+                },
+            },
+            "auth": {
+                "cookies": [{"name": "s", "value": "auth-cookie-s"}],
+                "tabState": {
+                    "found": True,
+                    "cookie": "s=auth-cookie-s",
+                    "userAgent": "Mozilla/5.0",
+                },
+            },
+            "network": {},
+        },
+    }
+
+    response = client.post("/extension/collect-auth", json=payload)
+    assert response.status_code == 200
+    result = response.json()
+    assert result["success"] is True
+    assert result["pts_session"]["configured"] is True
+    assert result["pts_session"]["source"] == "browser_extension"
+
+    env_text = env_path.read_text(encoding="utf-8")
+    assert "PTS_COOKIE_HEADER=c=pts-cookie-c; _ct_auth=aaa.eyJzdWIiOiJwdHMtdXNlci0xMjMifQ.bbb" in env_text
+    assert "PTS_AUTH_SOURCE=browser_extension" in env_text
+
+
+def test_extension_status_returns_connection_state(client) -> None:
+    response = client.get("/extension/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert "extension_connection" in payload

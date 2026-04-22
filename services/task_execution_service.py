@@ -49,6 +49,17 @@ class TaskExecutionService:
         self.db.commit()
         return self._to_task_run_detail(task_run)
 
+    def preview_task(self, task_id: uuid.UUID) -> TaskRunDetail:
+        task_plan, record = self._load_task_context(task_id)
+        result = self._run_precheck(task_plan, record)
+        task_run = self.task_run_repo.create_from_result(
+            task_plan.id,
+            result,
+            metadata={"trigger": "preview", "attempt": 1, "retried": False, "retry_count": 0},
+        )
+        self.db.commit()
+        return self._to_task_run_detail(task_run)
+
     async def execute_task(
         self,
         task_id: uuid.UUID,
@@ -279,7 +290,7 @@ class TaskExecutionService:
             stage_name = refreshed_data.get("work_order_stage")
             if refreshed_data.get("work_order_closed") is True:
                 refresh_status = "closed_confirmed"
-            elif stage_source in {"pts_local_chrome_profile", "pts_browser_session"} and stage_name:
+            elif stage_source in {"pts_local_chrome_profile", "pts_browser_session", "pts_browser_structured"} and stage_name:
                 refresh_status = "reopened_or_open"
             else:
                 refresh_status = "pending_confirmation"

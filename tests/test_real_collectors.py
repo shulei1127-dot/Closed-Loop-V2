@@ -232,6 +232,43 @@ def test_real_transport_auth_failure_raises(transport_server, monkeypatch) -> No
         asyncio.run(fetcher.fetch_structured(config))
 
 
+def test_real_transport_browser_auth_injects_cookie_and_xsrf_header(transport_server, monkeypatch) -> None:
+    config = ModuleSourceConfig.from_mapping(
+        {
+            "module_code": "visit",
+            "module_name": "visit",
+            "source_url": transport_server["base_url"],
+            "source_doc_key": "doc",
+            "source_view_key": "view",
+            "enabled": True,
+            "collector_type": "dingtalk",
+            "extra_config": {
+                "structured_endpoint": "/structured",
+                "structured_response_path": "data.payload",
+                "structured_columns_path": "columns",
+                "structured_rows_path": "rows",
+                "structured_meta_path": "meta",
+                "token_env": "TEST_DINGTALK_TOKEN",
+                "token_header": "X-Auth-Token",
+                "playwright_fallback_enabled": False,
+            },
+        }
+    )
+    monkeypatch.setenv("TEST_DINGTALK_TOKEN", "transport-token")
+    fetcher = DingtalkPayloadFetcher()
+    fetcher._resolve_browser_auth = lambda **kwargs: {
+        "auth_source": "local_chrome_cookie_db",
+        "cookies": {"doc_atoken": "browser-cookie", "XSRF-TOKEN": "browser-xsrf"},
+        "headers": {"X-XSRF-Token": "browser-xsrf"},
+        "matched_hosts": [".dingtalk.com"],
+    }
+    payload = asyncio.run(fetcher.fetch_structured(config))
+    assert payload is not None
+    request_headers = transport_server["request_log"][-1]["headers"]
+    assert request_headers["X-Xsrf-Token"] == "browser-xsrf"
+    assert "doc_atoken=browser-cookie" in request_headers.get("Cookie", "")
+
+
 def test_parallelv2_visit_collector_returns_structured_rows(dingtalk_parallelv2_server) -> None:
     config = ModuleSourceConfig.from_mapping(
         {
@@ -277,6 +314,53 @@ def test_parallelv2_visit_collector_returns_structured_rows(dingtalk_parallelv2_
     assert result.raw_meta["decoder"]["decoded_row_count"] == 2
     assert recognition.normalized_records[0]["customer_name"] == "上海测试客户"
     assert recognition.normalized_records[0]["normalized_data"]["visit_status"] == "已回访"
+    assert any("version=2314" in item["path"] for item in dingtalk_parallelv2_server["request_log"] if item["path"].startswith("/nt/api/sheets/Igz9TVd/records/binary/parallelV2"))
+
+
+def test_direct_parallelv2_visit_collector_resolves_version_from_live_document_data(dingtalk_parallelv2_server) -> None:
+    config = ModuleSourceConfig.from_mapping(
+        {
+            "module_code": "visit",
+            "module_name": "交付转售后回访闭环",
+            "source_url": dingtalk_parallelv2_server["base_url"],
+            "source_doc_key": "4j6OJ5jPAGa8eq3p",
+            "source_view_key": "AKOehLK",
+            "enabled": True,
+            "collector_type": "dingtalk",
+            "extra_config": {
+                "parallelv2_enabled": True,
+                "parallelv2_direct_access_token_enabled": True,
+                "parallelv2_dynamic_version_enabled": True,
+                "parallelv2_access_token_endpoint": "/core/api/accessToken",
+                "parallelv2_document_data_endpoint": "/api/document/data",
+                "parallelv2_document_data_method": "POST",
+                "parallelv2_document_data_json_body": {"pageMode": 2},
+                "parallelv2_endpoint": "/nt/api/sheets/Igz9TVd/records/binary/parallelV2",
+                "parallelv2_query_params": {
+                    "version": 9999,
+                    "sheetType": "",
+                    "limit": 2001,
+                },
+                "parallelv2_sheet_id": "Igz9TVd",
+                "parallelv2_view_id": "AKOehLK",
+                "parallelv2_doc_key": "4j6OJ5jPAGa8eq3p",
+                "parallelv2_dentry_key": "dYjLwGnPZcmxBbeB",
+                "parallelv2_structure_payload_path": "tests/fixtures/dingtalk/visit/document_data_live.json",
+                "parallelv2_token_header": "A-Token",
+                "playwright_fallback_enabled": False,
+            },
+        }
+    )
+
+    collector = VisitCollector(config)
+    result = asyncio.run(collector.collect())
+
+    assert result.sync_status == "success"
+    assert result.raw_meta["parallelv2_version"] == 2314
+    assert result.raw_meta["parallelv2_version_source"] == "live_document_data_checkpoint"
+    assert result.raw_meta["document_structure"]["source"] == "live_document_data"
+    assert any(item["path"].startswith("/core/api/accessToken") for item in dingtalk_parallelv2_server["request_log"])
+    assert any(item["path"].startswith("/api/document/data") for item in dingtalk_parallelv2_server["request_log"])
     assert any("version=2314" in item["path"] for item in dingtalk_parallelv2_server["request_log"] if item["path"].startswith("/nt/api/sheets/Igz9TVd/records/binary/parallelV2"))
 
 

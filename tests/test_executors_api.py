@@ -210,6 +210,43 @@ def test_visit_execute_runs_pts_direct_runner_successfully(client, db_session, m
     get_settings.cache_clear()
 
 
+def test_visit_pts_direct_allows_dingtalk_owner_different_from_current_pts_user(client, db_session, monkeypatch, visit_real_server) -> None:
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
+    monkeypatch.setenv("VISIT_REAL_EXECUTION_ENABLED", "true")
+    monkeypatch.setenv("PTS_COOKIE_HEADER", "session=visit-real-cookie")
+    monkeypatch.setenv("PTS_BASE_URL", visit_real_server["base_url"])
+    monkeypatch.delenv("VISIT_REAL_BASE_URL", raising=False)
+    monkeypatch.delenv("VISIT_REAL_TOKEN", raising=False)
+    monkeypatch.setattr(VisitRealRunner, "_browser_session_available", lambda self: False)
+    get_settings.cache_clear()
+    _run_sync(client, "visit")
+    task = _get_planned_task(db_session, "visit")
+    record = db_session.get(NormalizedRecord, task.normalized_record_id)
+    assert record is not None
+    data = dict(record.normalized_data)
+    data["pts_link"] = f"{visit_real_server['base_url']}/pts/{data['delivery_id']}"
+    data["visit_owner"] = "龙静玥"
+    data["visit_type"] = "客户满意度调研"
+    data["satisfaction"] = "十分满意"
+    data["feedback_note"] = "来自钉钉文档的备注"
+    record.normalized_data = data
+    db_session.commit()
+
+    response = client.post(f"/api/tasks/{task.id}/execute", json={"dry_run": False})
+    assert response.status_code == 200
+    payload = response.json()["item"]
+
+    assert payload["run_status"] == "success"
+    create_result = payload["result_payload"]["action_results"][1]
+    assign_result = payload["result_payload"]["action_results"][2]
+    assert create_result["dingtalk_visit_owner"] == "龙静玥"
+    assert create_result["pts_current_user"] == "舒磊"
+    assert assign_result["owner"] == "龙静玥"
+    assert assign_result["assigned_owner"] == "舒磊"
+    assert assign_result["owner_mismatch_allowed"] is True
+    get_settings.cache_clear()
+
+
 def test_visit_execute_prefers_browser_session_mode_when_available(client, db_session, monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
     monkeypatch.setenv("VISIT_REAL_EXECUTION_ENABLED", "true")
@@ -873,14 +910,13 @@ def test_proactive_execute_returns_simulated_success(client, db_session) -> None
     assert payload["result_payload"]["runner_diagnostics"]["mode"] == "simulated"
 
 
-def test_proactive_execute_returns_manual_required_without_contact(client, db_session) -> None:
+def test_proactive_execute_precheck_fails_without_feedback_note(client, db_session) -> None:
     _run_sync(client, "proactive")
     task = _get_planned_task(db_session, "proactive")
     record = db_session.get(NormalizedRecord, task.normalized_record_id)
     assert record is not None
     data = dict(record.normalized_data)
-    data["contact_name"] = None
-    data["contact_phone"] = None
+    data["feedback_note"] = None
     record.normalized_data = data
     db_session.commit()
 
@@ -888,10 +924,10 @@ def test_proactive_execute_returns_manual_required_without_contact(client, db_se
     assert response.status_code == 200
     payload = response.json()["item"]
 
-    assert payload["run_status"] == "manual_required"
-    assert payload["manual_required"] is True
-    assert payload["result_payload"]["execution_mode"] == "manual_required"
-    assert "联系人" in (payload["error_message"] or "")
+    assert payload["run_status"] == "precheck_failed"
+    assert payload["manual_required"] is False
+    assert payload["result_payload"]["execution_mode"] in {"simulated", "real_precheck"}
+    assert "feedback_note" in payload["result_payload"]["missing_fields"]
 
 
 def test_proactive_precheck_fails_when_real_execution_enabled_but_config_missing(client, db_session, monkeypatch) -> None:
@@ -937,6 +973,7 @@ def test_proactive_execute_runs_real_runner_successfully(client, db_session, mon
     assert len(payload["result_payload"]["action_results"]) == 3
     assert payload["result_payload"]["action_results"][0]["action"] == "create_proactive_work_order"
     assert payload["result_payload"]["action_results"][1]["action"] == "assign_owner"
+    assert payload["result_payload"]["action_results"][1]["owner"]
     assert payload["result_payload"]["action_results"][2]["action"] == "fill_feedback"
     assert payload["final_link"].startswith(f"{proactive_real_server['base_url']}/proactive-work-orders/")
     assert proactive_real_server["request_log"][0]["path"] == "/proactive-work-orders"

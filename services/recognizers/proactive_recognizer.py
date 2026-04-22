@@ -1,3 +1,5 @@
+import json
+
 from schemas.proactive import ProactiveNormalizedRecord
 from schemas.sync import RecognitionResult
 from services.recognizers.field_inference import (
@@ -8,6 +10,71 @@ from services.recognizers.field_inference import (
     merge_unresolved_fields,
     summarize_recognition_status,
 )
+
+
+def _normalize_visit_owner(value):
+    if value is None:
+        return None
+    if isinstance(value, list):
+        names = [_extract_mention_name(item) for item in value]
+        names = [name for name in names if name]
+        return "、".join(dict.fromkeys(names)) or None
+    if isinstance(value, dict):
+        return _extract_mention_name(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith("[") or text.startswith("{"):
+        try:
+            return _normalize_visit_owner(json.loads(text))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return text
+
+
+def _extract_mention_name(value):
+    if not isinstance(value, dict):
+        return None
+    for key in ("realName", "name", "nick", "title", "text", "sequence", "displayName"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    nested_data = value.get("data")
+    if isinstance(nested_data, str) and nested_data.strip().startswith(("{", "[")):
+        try:
+            return _extract_mention_name(json.loads(nested_data))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+    if isinstance(nested_data, dict):
+        return _extract_mention_name(nested_data)
+    return None
+
+
+def _normalize_visit_link(value):
+    if value is None:
+        return None
+    if isinstance(value, list):
+        for item in value:
+            normalized = _normalize_visit_link(item)
+            if normalized:
+                return normalized
+        return None
+    if isinstance(value, dict):
+        for key in ("url", "href", "link", "value", "text"):
+            candidate = value.get(key)
+            normalized = _normalize_visit_link(candidate)
+            if normalized:
+                return normalized
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.startswith("[") or text.startswith("{"):
+        try:
+            return _normalize_visit_link(json.loads(text))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return text
 
 
 FIELD_SPECS = {
@@ -25,17 +92,26 @@ FIELD_SPECS = {
             "未联系": "未建联",
         },
     ),
-    "visit_link": FieldSpec(aliases=("回访链接", "闭环链接", "工单链接", "回访单链接"), kind="url", allow_empty=True),
-    "feedback_note": FieldSpec(aliases=("反馈备注", "备注", "客户反馈", "反馈内容")),
+    "visit_link": FieldSpec(
+        aliases=("回访链接", "闭环链接", "工单链接", "回访单链接"),
+        normalizer=_normalize_visit_link,
+        allow_empty=True,
+    ),
+    "visit_owner": FieldSpec(aliases=("回访人", "回访负责人", "负责人"), normalizer=_normalize_visit_owner),
+    "feedback_note": FieldSpec(
+        aliases=("备注（异常详情+其他备注）", "异常详情+其他备注", "反馈备注", "备注", "客户反馈", "反馈内容")
+    ),
     "contact_name": FieldSpec(aliases=("联系人", "客户联系人", "联络人")),
     "contact_phone": FieldSpec(aliases=("联系电话", "联系人电话", "手机号"), kind="phone"),
-    "engineer_name": FieldSpec(aliases=("工程师", "负责人", "对接工程师")),
+    "engineer_name": FieldSpec(aliases=("工程师", "对接工程师")),
 }
 
 KEY_GROUPS = [
     ("customer_name",),
     ("liaison_status",),
     ("visit_link",),
+    ("visit_owner",),
+    ("feedback_note",),
 ]
 
 

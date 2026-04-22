@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import mimetypes
@@ -316,7 +317,7 @@ class InspectionRealRunner:
                         {
                             "action": "validate_pts_account",
                             "status": "manual_required",
-                            "error_type": "business_rejected",
+                            "error_type": "manual_required_owner",
                             "error_message": "当前 PTS 登录账号不是舒磊，无法自动指定工单负责人",
                             "retryable": False,
                         }
@@ -330,46 +331,23 @@ class InspectionRealRunner:
                     )
                 diagnostics.setdefault("postcheck", self._empty_postcheck_payload())
                 if runtime["is_finished"] or runtime["current_stage_name"] in {"审核工单", "完成"}:
-                    expected_uploaded_files = self._resolve_report_match_word_files(report_match)
-                    already_closed = normalize_action_result(
+                    already_closed_result = normalize_action_result(
                         {
-                        "action": "complete_inspection",
-                        "status": "success",
-                        "final_link": work_order_link,
-                        "stage_before": runtime["current_stage_name"],
-                        "stage_after": runtime["current_stage_name"],
-                        "already_closed": True,
-                        "closure_transition_confirmed": True,
+                            "action": "validate_execution_preconditions",
+                            "status": "manual_required",
+                            "error_type": "already_closed_before_execution",
+                            "error_message": "工单当前已处于审核/完成阶段，本次不执行上传闭环",
+                            "retryable": False,
+                            "stage_after": runtime["current_stage_name"],
+                            "is_finished": bool(runtime["is_finished"]),
                         }
                     )
-                    action_results.append(already_closed)
-                    postcheck_result = normalize_action_result(
-                        await self._pts_postcheck_work_order(
-                            browser,
-                            runtime=runtime,
-                            uploaded_file_ids=[],
-                            uploaded_files=[],
-                            uploaded_remote_files=[],
-                            expected_uploaded_filenames=expected_uploaded_files,
-                        )
-                    )
-                    action_results.append(postcheck_result)
-                    diagnostics["postcheck"] = self._build_postcheck_diagnostics(postcheck_result)
-                    if postcheck_result["status"] != "success":
-                        return self._failure_outcome(
-                            diagnostics=diagnostics,
-                            action_results=action_results,
-                            action_result=postcheck_result,
-                            fallback_message="巡检工单已处于闭环阶段，但最终校验未通过",
-                        )
-                    action_results = refresh_runner_diagnostics(diagnostics, action_results)
-                    mark_runner_success(diagnostics)
-                    return InspectionRealRunOutcome(
-                        run_status="success",
-                        final_link=work_order_link,
-                        retryable=False,
+                    action_results.append(already_closed_result)
+                    return self._manual_required_outcome(
+                        diagnostics=diagnostics,
                         action_results=action_results,
-                        runner_diagnostics=diagnostics,
+                        action_result=already_closed_result,
+                        fallback_message="工单已闭环，当前执行不再触发上传链",
                     )
 
                 add_member_result = normalize_action_result(
@@ -411,7 +389,12 @@ class InspectionRealRunner:
                     )
 
                 upload_result = normalize_action_result(
-                    await self._pts_upload_reports(browser, report_match)
+                    await self._pts_upload_reports(
+                        browser,
+                        report_match,
+                        work_order_link=work_order_link,
+                        runtime=runtime,
+                    )
                 )
                 action_results.append(upload_result)
                 if upload_result["status"] != "success":
@@ -422,21 +405,36 @@ class InspectionRealRunner:
                         fallback_message="上传巡检报告失败",
                     )
 
-                add_info_result = normalize_action_result(
-                    await self._pts_add_work_order_info(
-                        browser,
-                        work_order_id=work_order_id,
-                        customer_name=str(context.normalized_data.get("customer_name") or ""),
-                        uploaded_file_ids=upload_result.get("uploaded_file_ids", []),
+                if self._should_add_work_order_info_after_upload():
+                    add_info_result = normalize_action_result(
+                        await self._pts_add_work_order_info(
+                            browser,
+                            work_order_id=work_order_id,
+                            work_order_link=work_order_link,
+                            customer_name=str(context.normalized_data.get("customer_name") or ""),
+                            uploaded_file_ids=upload_result.get("uploaded_file_ids", []),
+                            uploaded_remote_files=upload_result.get("uploaded_remote_files", []),
+                        )
                     )
-                )
-                action_results.append(add_info_result)
-                if add_info_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=add_info_result,
-                        fallback_message="写入工单处理记录失败",
+                    action_results.append(add_info_result)
+                    if add_info_result["status"] != "success":
+                        return self._failure_outcome(
+                            diagnostics=diagnostics,
+                            action_results=action_results,
+                            action_result=add_info_result,
+                            fallback_message="写入工单处理记录失败",
+                        )
+                else:
+                    action_results.append(
+                        normalize_action_result(
+                            {
+                                "action": "add_work_order_info",
+                                "status": "skipped",
+                                "error_type": None,
+                                "error_message": "已启用 PTS 前端上传模式，跳过自动备注写入",
+                                "retryable": False,
+                            }
+                        )
                     )
 
                 attachment_precheck_result = normalize_action_result(
@@ -535,6 +533,7 @@ class InspectionRealRunner:
             "postcheck_uploaded_file_ids_found": [],
             "postcheck_uploaded_filenames_expected": [],
             "postcheck_uploaded_filenames_found": [],
+            "postcheck_attachment_match_mode": "none",
             "postcheck_source": "pts_browser_session",
         }
 
@@ -550,6 +549,7 @@ class InspectionRealRunner:
                 "postcheck_uploaded_file_ids_found": postcheck_result.get("uploaded_file_ids_found", []),
                 "postcheck_uploaded_filenames_expected": postcheck_result.get("uploaded_filenames_expected", []),
                 "postcheck_uploaded_filenames_found": postcheck_result.get("uploaded_filenames_found", []),
+                "postcheck_attachment_match_mode": postcheck_result.get("attachment_match_mode", "none"),
                 "postcheck_source": postcheck_result.get("postcheck_source", "pts_browser_session"),
             }
         )
@@ -561,14 +561,18 @@ class InspectionRealRunner:
         work_order_id: str,
         work_order_link: str,
     ) -> dict[str, Any]:
-        me = await browser.graphql_payload(
-            {
+        me = await self._query_runtime_graphql(
+            browser,
+            work_order_link=work_order_link,
+            payload={
                 "operationName": "Me",
                 "query": "query Me { me { id name } }",
-            }
+            },
         )
-        work_order = await browser.graphql_payload(
-            {
+        work_order = await self._query_runtime_graphql(
+            browser,
+            work_order_link=work_order_link,
+            payload={
                 "operationName": "WorkOrderByID",
                 "variables": {"id": work_order_id},
                 "query": (
@@ -586,7 +590,7 @@ class InspectionRealRunner:
                     "} "
                     "}"
                 ),
-            }
+            },
         )
         work_order_data = (work_order or {}).get("workOrderByID") or {}
         member_container = work_order_data.get("product_delivery_support") or work_order_data.get("delivery") or {}
@@ -622,6 +626,280 @@ class InspectionRealRunner:
             "all_attached_files": all_attached_files,
         }
 
+    async def _query_runtime_graphql(
+        self,
+        browser: _PtsBrowserSession,
+        *,
+        work_order_link: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        operation_name = str(payload.get("operationName") or "AnonymousOperation")
+        endpoint = "/query"
+        max_attempts = 3
+        last_error: _PtsRunnerError | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                raw_result = await browser.execute_js_on_project(
+                    work_order_link,
+                    self._build_runtime_graphql_probe_script(payload, endpoint=endpoint),
+                )
+                parsed_result = (
+                    raw_result if isinstance(raw_result, dict) else {"status": 0, "raw": str(raw_result or "")}
+                )
+                status = self._safe_int(parsed_result.get("status"))
+                response_url = str(parsed_result.get("responseURL") or "")
+                page_url = str(parsed_result.get("url") or "")
+                content_type = str(parsed_result.get("contentType") or "")
+                response_text = str(parsed_result.get("text") or "")
+                client_error = str(parsed_result.get("error") or "")
+
+                if (
+                    status in {401, 403}
+                    or "auth.chaitin.net/login" in response_url
+                    or "auth.chaitin.net/login" in page_url
+                ):
+                    raise _PtsRunnerError(
+                        error_message=self._build_runtime_error_message(
+                            reason="PTS 会话已失效，请重新登录 PTS 或更新 Cookie",
+                            operation_name=operation_name,
+                            endpoint=endpoint,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            status=status,
+                            content_type=content_type,
+                            response_url=response_url,
+                            page_url=page_url,
+                            response_text=response_text,
+                            raw_error=client_error,
+                        ),
+                        error_type="session_expired",
+                        retryable=False,
+                        http_status=status or None,
+                    )
+
+                if status >= 400:
+                    retryable = status >= 500
+                    raise _PtsRunnerError(
+                        error_message=self._build_runtime_error_message(
+                            reason=f"PTS GraphQL 请求失败: {status}",
+                            operation_name=operation_name,
+                            endpoint=endpoint,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            status=status,
+                            content_type=content_type,
+                            response_url=response_url,
+                            page_url=page_url,
+                            response_text=response_text,
+                            raw_error=client_error,
+                        ),
+                        error_type="http_error" if status >= 500 else "business_rejected",
+                        retryable=retryable,
+                        http_status=status,
+                    )
+
+                if not response_text.strip():
+                    raise _PtsRunnerError(
+                        error_message=self._build_runtime_error_message(
+                            reason="PTS GraphQL 返回空响应",
+                            operation_name=operation_name,
+                            endpoint=endpoint,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            status=status,
+                            content_type=content_type,
+                            response_url=response_url,
+                            page_url=page_url,
+                            response_text=response_text,
+                            raw_error=client_error,
+                        ),
+                        error_type="empty_response",
+                        retryable=True,
+                        http_status=status or None,
+                    )
+
+                response_text_lower = response_text.strip().lower()
+                content_type_lower = content_type.lower()
+                if (
+                    "text/html" in content_type_lower
+                    or response_text_lower.startswith("<!doctype html")
+                    or response_text_lower.startswith("<html")
+                ):
+                    err_type = (
+                        "session_expired"
+                        if "auth.chaitin.net/login" in response_text_lower
+                        else "upstream_html_response"
+                    )
+                    raise _PtsRunnerError(
+                        error_message=self._build_runtime_error_message(
+                            reason=(
+                                "PTS 会话已失效，请重新登录 PTS 或更新 Cookie"
+                                if err_type == "session_expired"
+                                else "PTS GraphQL 返回 HTML 响应"
+                            ),
+                            operation_name=operation_name,
+                            endpoint=endpoint,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            status=status,
+                            content_type=content_type,
+                            response_url=response_url,
+                            page_url=page_url,
+                            response_text=response_text,
+                            raw_error=client_error,
+                        ),
+                        error_type=err_type,
+                        retryable=err_type != "session_expired",
+                        http_status=status or None,
+                    )
+
+                try:
+                    response_payload = json.loads(response_text)
+                except ValueError as exc:
+                    raise _PtsRunnerError(
+                        error_message=self._build_runtime_error_message(
+                            reason="PTS GraphQL 返回非法 JSON",
+                            operation_name=operation_name,
+                            endpoint=endpoint,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            status=status,
+                            content_type=content_type,
+                            response_url=response_url,
+                            page_url=page_url,
+                            response_text=response_text,
+                            raw_error=client_error,
+                        ),
+                        error_type="response_invalid",
+                        retryable=True,
+                        http_status=status or None,
+                    ) from exc
+
+                errors = response_payload.get("errors") or []
+                if errors:
+                    message = str(errors[0].get("message") or "PTS GraphQL 返回错误").strip()
+                    raise _PtsRunnerError(
+                        error_message=self._build_runtime_error_message(
+                            reason=message,
+                            operation_name=operation_name,
+                            endpoint=endpoint,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            status=status,
+                            content_type=content_type,
+                            response_url=response_url,
+                            page_url=page_url,
+                            response_text=response_text,
+                            raw_error=client_error,
+                        ),
+                        error_type="business_rejected",
+                        retryable=False,
+                        http_status=status or None,
+                    )
+
+                data = response_payload.get("data")
+                if not isinstance(data, dict):
+                    raise _PtsRunnerError(
+                        error_message=self._build_runtime_error_message(
+                            reason="PTS GraphQL 缺少 data 字段",
+                            operation_name=operation_name,
+                            endpoint=endpoint,
+                            attempt=attempt,
+                            max_attempts=max_attempts,
+                            status=status,
+                            content_type=content_type,
+                            response_url=response_url,
+                            page_url=page_url,
+                            response_text=response_text,
+                            raw_error=client_error,
+                        ),
+                        error_type="response_invalid",
+                        retryable=True,
+                        http_status=status or None,
+                    )
+                return data
+            except _PtsRunnerError as exc:
+                last_error = exc
+                if exc.error_type in {"empty_response", "upstream_html_response", "response_invalid"} and attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise _PtsRunnerError(
+            error_message=f"PTS runtime 查询失败 action={operation_name} endpoint={endpoint}",
+            error_type="response_invalid",
+            retryable=False,
+        )
+
+    @staticmethod
+    def _build_runtime_graphql_probe_script(payload: dict[str, Any], *, endpoint: str) -> str:
+        encoded_payload = json.dumps(payload, ensure_ascii=False)
+        return (
+            "var xhr=new XMLHttpRequest();"
+            f"xhr.open('POST',{json.dumps(endpoint)},false);"
+            "xhr.withCredentials=true;"
+            "xhr.setRequestHeader('Content-Type','application/json');"
+            "xhr.setRequestHeader('Accept','*/*');"
+            f"try{{xhr.send({json.dumps(encoded_payload, ensure_ascii=False)});"
+            "JSON.stringify({"
+            "status:xhr.status,"
+            "responseURL:(xhr.responseURL||''),"
+            "contentType:(xhr.getResponseHeader('content-type')||''),"
+            "text:(xhr.responseText||''),"
+            "url:(window.location.href||'')"
+            "});}"
+            "catch(e){JSON.stringify({"
+            "status:0,"
+            "error:String(e),"
+            "responseURL:'',"
+            "contentType:'',"
+            "text:'',"
+            "url:(window.location.href||'')"
+            "});}"
+        )
+
+    def _build_runtime_error_message(
+        self,
+        *,
+        reason: str,
+        operation_name: str,
+        endpoint: str,
+        attempt: int,
+        max_attempts: int,
+        status: int,
+        content_type: str,
+        response_url: str,
+        page_url: str,
+        response_text: str,
+        raw_error: str,
+    ) -> str:
+        return (
+            f"{reason}; action={operation_name}; endpoint={endpoint}; "
+            f"attempt={attempt}/{max_attempts}; status={status}; "
+            f"content_type={self._truncate_runtime_text(content_type, 80)}; "
+            f"response_url={self._truncate_runtime_text(response_url, 180)}; "
+            f"page_url={self._truncate_runtime_text(page_url, 180)}; "
+            f"response_preview={self._truncate_runtime_text(response_text, 220)}; "
+            f"raw_error={self._truncate_runtime_text(raw_error, 120)}"
+        )
+
+    @staticmethod
+    def _truncate_runtime_text(value: Any, limit: int) -> str:
+        text = str(value or "").replace("\n", "\\n").replace("\r", "")
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "..."
+
+    @staticmethod
+    def _safe_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
     async def _pts_add_member_if_missing(
         self,
         browser: _PtsBrowserSession,
@@ -644,6 +922,7 @@ class InspectionRealRunner:
                 "status": "manual_required",
                 "member_name": member_name,
                 "error_message": "无法解析项目成员列表，需人工添加舒磊到项目成员",
+                "error_type": "manual_required_owner",
                 "retryable": False,
             }
         try:
@@ -675,7 +954,8 @@ class InspectionRealRunner:
                     "status": "manual_required",
                     "member_name": member_name,
                     "error_message": "当前 PTS 账号无权添加项目成员，请人工处理",
-                    "error_type": "permission_denied",
+                    "error_type": "manual_required_owner",
+                    "source_error_type": "permission_denied",
                     "retryable": False,
                 }
             return {
@@ -732,7 +1012,8 @@ class InspectionRealRunner:
                     "status": "manual_required",
                     "owner": owner_name,
                     "error_message": "当前 PTS 账号无权指定工单负责人，请人工处理",
-                    "error_type": "permission_denied",
+                    "error_type": "manual_required_owner",
+                    "source_error_type": "permission_denied",
                     "retryable": False,
                 }
             return {
@@ -749,6 +1030,9 @@ class InspectionRealRunner:
         self,
         browser: _PtsBrowserSession,
         report_match: ReportMatchResult,
+        *,
+        work_order_link: str,
+        runtime: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         uploaded_files: list[str] = []
         uploaded_file_ids: list[str] = []
@@ -758,49 +1042,97 @@ class InspectionRealRunner:
             return {
                 "action": "upload_report_files",
                 "status": "failed",
+                "error_type": "upload_failed",
                 "error_message": "未找到可上传的 Word 报告",
                 "retryable": False,
             }
         try:
+            runtime_for_upload = runtime or {}
             for file_path in word_files:
                 path = Path(file_path)
                 uploaded_files.append(str(path))
-                content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-                payload = await self._upload_file_via_browser(
-                    browser,
-                    path=path,
-                    content_type=content_type,
-                )
-                uploaded_file_id = str(payload.get("id") or "").strip()
-                if not uploaded_file_id:
-                    raise _PtsRunnerError(
-                        error_message="上传巡检报告成功但未返回文件 ID",
-                        error_type="response_invalid",
-                        retryable=False,
+                if self._use_frontend_upload_mode():
+                    uploaded = await self._upload_file_via_frontend_ui(
+                        browser=browser,
+                        path=path,
+                        work_order_link=work_order_link,
+                        runtime=runtime_for_upload,
                     )
-                uploaded_file_ids.append(uploaded_file_id)
-                uploaded_remote_files.append(
-                    {
-                        "id": uploaded_file_id,
-                        "filename": str(payload.get("filename") or path.name),
-                    }
-                )
+                    uploaded_file_id = str(uploaded.get("id") or "").strip()
+                    uploaded_filename = str(uploaded.get("filename") or path.name).strip()
+                    if uploaded_file_id:
+                        uploaded_file_ids.append(uploaded_file_id)
+                    uploaded_remote_files.append(
+                        {
+                            "id": uploaded_file_id,
+                            "filename": uploaded_filename,
+                        }
+                    )
+                else:
+                    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+                    payload = await self._upload_file_via_browser(
+                        browser,
+                        path=path,
+                        content_type=content_type,
+                        work_order_link=work_order_link,
+                    )
+                    upload_err = payload.get("err")
+                    if upload_err not in (None, 0, "0", ""):
+                        raise _PtsRunnerError(
+                            error_message=f"上传巡检报告返回错误 err={upload_err}",
+                            error_type="response_invalid",
+                            retryable=False,
+                        )
+                    uploaded_file_id = str(payload.get("id") or "").strip()
+                    if not uploaded_file_id:
+                        raise _PtsRunnerError(
+                            error_message="上传巡检报告成功但未返回文件 ID",
+                            error_type="response_invalid",
+                            retryable=False,
+                        )
+                    uploaded_file_ids.append(uploaded_file_id)
+                    uploaded_remote_files.append(
+                        {
+                            "id": uploaded_file_id,
+                            "filename": str(payload.get("filename") or path.name),
+                        }
+                    )
+            validation_error = self._validate_uploaded_report_results(
+                local_files=word_files,
+                uploaded_files=uploaded_files,
+                uploaded_file_ids=uploaded_file_ids,
+                uploaded_remote_files=uploaded_remote_files,
+            )
+            if validation_error is not None:
+                return {
+                    "action": "upload_report_files",
+                    "status": "failed",
+                    "error_type": "upload_failed",
+                    "error_message": validation_error,
+                    "retryable": False,
+                    "uploaded_files": uploaded_files,
+                    "uploaded_word_files": uploaded_files,
+                    "uploaded_file_ids": [item for item in uploaded_file_ids if item],
+                    "uploaded_remote_files": uploaded_remote_files,
+                }
         except OSError as exc:
             return {
                 "action": "upload_report_files",
                 "status": "failed",
                 "uploaded_files": uploaded_files,
-                "error_type": "unknown_error",
+                "error_type": "upload_failed",
                 "error_message": f"读取巡检报告失败: {exc}",
                 "retryable": False,
             }
         except _PtsRunnerError as exc:
             status = "manual_required" if exc.error_type == "permission_denied" else "failed"
+            error_type = exc.error_type if status == "manual_required" else "upload_failed"
             return {
                 "action": "upload_report_files",
                 "status": status,
                 "uploaded_files": uploaded_files,
-                "error_type": exc.error_type,
+                "error_type": error_type,
+                "source_error_type": exc.error_type,
                 "http_status": exc.http_status,
                 "error_message": exc.error_message,
                 "retryable": exc.retryable,
@@ -814,12 +1146,256 @@ class InspectionRealRunner:
             "uploaded_remote_files": uploaded_remote_files,
         }
 
+    def _use_frontend_upload_mode(self) -> bool:
+        return bool(getattr(self.settings, "inspection_upload_via_frontend_enabled", True))
+
+    def _should_add_work_order_info_after_upload(self) -> bool:
+        return bool(getattr(self.settings, "inspection_add_work_order_info_enabled", False))
+
+    async def _upload_file_via_frontend_ui(
+        self,
+        *,
+        browser: _PtsBrowserSession,
+        path: Path,
+        work_order_link: str,
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        work_order_id = str(runtime.get("work_order_id") or "").strip()
+        if not work_order_id:
+            work_order_id = _resolve_work_order_id_from_link(work_order_link) or ""
+        if not work_order_id:
+            raise _PtsRunnerError(
+                error_message="无法解析工单 ID，无法执行前端上传",
+                error_type="response_invalid",
+                retryable=False,
+            )
+
+        before_runtime = await self._load_pts_runtime(browser, work_order_id, work_order_link)
+        before_ids = {
+            str(item.get("id") or "").strip()
+            for item in before_runtime.get("all_attached_files") or []
+            if str(item.get("id") or "").strip()
+        }
+
+        trigger_result = await browser.trigger_frontend_file_upload_dialog(work_order_link)
+        if trigger_result.get("status") != "success":
+            raise _PtsRunnerError(
+                error_message=str(trigger_result.get("error_message") or "触发上传窗口失败"),
+                error_type=str(trigger_result.get("error_type") or "response_invalid"),
+                retryable=False,
+            )
+        inject_result = await self._inject_file_into_frontend_upload_input(
+            browser=browser,
+            work_order_link=work_order_link,
+            path=path,
+        )
+        if inject_result.get("status") != "success":
+            # Fallback: when frontend input injection fails, try native file dialog.
+            # This path depends on macOS automation permissions (System Events).
+            choose_result = await browser.choose_file_in_dialog(str(path))
+            if choose_result.get("status") != "success":
+                inject_error = str(inject_result.get("error_message") or "前端输入框注入失败")
+                choose_error = str(choose_result.get("error_message") or "选择本地文件失败")
+                raise _PtsRunnerError(
+                    error_message=(
+                        f"PTS 前端上传失败: inject={inject_error}; choose={choose_error}; "
+                        "如为权限问题，请在 macOS 隐私与安全性中允许终端/应用控制“系统事件”与“Google Chrome”。"
+                    ),
+                    error_type=str(choose_result.get("error_type") or "unknown_error"),
+                    retryable=bool(choose_result.get("retryable", False)),
+                )
+
+        uploaded = await self._wait_attachment_after_ui_upload(
+            browser=browser,
+            work_order_id=work_order_id,
+            work_order_link=work_order_link,
+            expected_filename=path.name,
+            before_ids=before_ids,
+        )
+        runtime.update(uploaded.get("runtime") or {})
+        return {
+            "id": uploaded.get("id"),
+            "filename": uploaded.get("filename") or path.name,
+        }
+
+    async def _inject_file_into_frontend_upload_input(
+        self,
+        *,
+        browser: _PtsBrowserSession,
+        work_order_link: str,
+        path: Path,
+    ) -> dict[str, Any]:
+        try:
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError as exc:
+            return {
+                "action": "inject_frontend_file_input",
+                "status": "failed",
+                "error_type": "upload_failed",
+                "error_message": f"读取本地文件失败: {exc}",
+                "retryable": False,
+            }
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        script = f"""
+        (() => {{
+          try {{
+            const inputCandidates = Array.from(document.querySelectorAll('input[type="file"]'))
+              .filter((el) => !el.disabled);
+            if (!inputCandidates.length) {{
+              return JSON.stringify({{
+                status: "failed",
+                error: "未找到可用的 input[type=file]"
+              }});
+            }}
+            const input = inputCandidates[inputCandidates.length - 1];
+            const base64 = {json.dumps(encoded)};
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) {{
+              bytes[i] = binary.charCodeAt(i);
+            }}
+            const file = new File([bytes], {json.dumps(path.name)}, {{ type: {json.dumps(content_type)} }});
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            try {{
+              input.files = dt.files;
+            }} catch (e) {{
+              Object.defineProperty(input, "files", {{
+                value: dt.files,
+                configurable: true,
+              }});
+            }}
+            input.dispatchEvent(new Event("input", {{ bubbles: true }}));
+            input.dispatchEvent(new Event("change", {{ bubbles: true }}));
+            return JSON.stringify({{
+              status: "success",
+              filename: file.name,
+              input_count: inputCandidates.length
+            }});
+          }} catch (error) {{
+            return JSON.stringify({{
+              status: "failed",
+              error: String(error || "")
+            }});
+          }}
+        }})()
+        """
+        raw_result = await browser.execute_js_on_project(work_order_link, script)
+        result = raw_result if isinstance(raw_result, dict) else {}
+        if str(result.get("status") or "").strip() == "success":
+            return {
+                "action": "inject_frontend_file_input",
+                "status": "success",
+                "filename": str(result.get("filename") or path.name),
+            }
+        return {
+            "action": "inject_frontend_file_input",
+            "status": "failed",
+            "error_type": "response_invalid",
+            "error_message": (
+                f"注入前端上传 input 失败: {result.get('error') or 'unknown_error'}"
+            ),
+            "retryable": False,
+        }
+
+    async def _wait_attachment_after_ui_upload(
+        self,
+        *,
+        browser: _PtsBrowserSession,
+        work_order_id: str,
+        work_order_link: str,
+        expected_filename: str,
+        before_ids: set[str],
+    ) -> dict[str, Any]:
+        expected_filename = str(expected_filename or "").strip()
+        last_runtime: dict[str, Any] | None = None
+        for attempt in range(1, 16):
+            runtime = await self._load_pts_runtime(browser, work_order_id, work_order_link)
+            last_runtime = runtime
+            attachments = runtime.get("all_attached_files") or []
+            for item in attachments:
+                attachment_id = str(item.get("id") or "").strip()
+                filename = str(item.get("filename") or "").strip()
+                if attachment_id and attachment_id not in before_ids:
+                    if expected_filename and filename and filename != expected_filename:
+                        continue
+                    return {"id": attachment_id, "filename": filename, "runtime": runtime}
+            for item in attachments:
+                attachment_id = str(item.get("id") or "").strip()
+                filename = str(item.get("filename") or "").strip()
+                if filename and expected_filename and filename == expected_filename:
+                    return {"id": attachment_id, "filename": filename, "runtime": runtime}
+            await asyncio.sleep(0.35)
+
+        preview = ""
+        if last_runtime is not None:
+            preview = self._truncate_runtime_text(
+                json.dumps(last_runtime.get("all_attached_files") or [], ensure_ascii=False),
+                280,
+            )
+        raise _PtsRunnerError(
+            error_message=(
+                f"PTS 前端上传后未观察到附件变化: filename={expected_filename}; "
+                f"attempts=15; attachment_preview={preview}"
+            ),
+            error_type="upload_failed",
+            retryable=False,
+        )
+
+    @staticmethod
+    def _validate_uploaded_report_results(
+        *,
+        local_files: list[str],
+        uploaded_files: list[str],
+        uploaded_file_ids: list[str],
+        uploaded_remote_files: list[dict[str, Any]],
+    ) -> str | None:
+        local_count = len(local_files)
+        uploaded_count = len(uploaded_files)
+        remote_count = len(uploaded_remote_files)
+        file_id_count = len([item for item in uploaded_file_ids if str(item).strip()])
+        local_filenames = [Path(item).name.strip() for item in local_files if Path(item).name.strip()]
+        remote_filenames = [
+            str(item.get("filename") or "").strip()
+            for item in uploaded_remote_files
+            if str(item.get("filename") or "").strip()
+        ]
+        if local_count <= 0:
+            return "未找到本次上传文件"
+        if uploaded_count != local_count:
+            return f"上传结果数量异常: local={local_count}, uploaded={uploaded_count}"
+        if remote_count != local_count:
+            return f"远端文件数量异常: local={local_count}, remote={remote_count}"
+        if file_id_count != local_count:
+            return f"远端文件 ID 数量异常: local={local_count}, file_ids={file_id_count}"
+        if len(local_filenames) != local_count:
+            return "本地上传文件名解析异常，无法确认上传结果"
+        if len(remote_filenames) != remote_count:
+            return "远端返回文件名解析异常，无法确认上传结果"
+        if len(set(uploaded_file_ids)) != file_id_count:
+            return "远端文件 ID 存在重复，无法确认一一对应关系"
+        if len(set(local_filenames)) == local_count and len(set(remote_filenames)) == remote_count:
+            if set(local_filenames) != set(remote_filenames):
+                return (
+                    "上传文件名不一致，无法确认一一对应关系: "
+                    f"local={local_filenames}, remote={remote_filenames}"
+                )
+        for index, remote_item in enumerate(uploaded_remote_files):
+            remote_id = str(remote_item.get("id") or "").strip()
+            remote_name = str(remote_item.get("filename") or "").strip()
+            if not remote_id:
+                return f"远端文件缺少 ID(index={index})"
+            if not remote_name:
+                return f"远端文件缺少文件名(index={index})"
+        return None
+
     async def _upload_file_via_browser(
         self,
         browser: _PtsBrowserSession,
         *,
         path: Path,
         content_type: str,
+        work_order_link: str,
     ) -> dict[str, Any]:
         raw_bytes = path.read_bytes()
         encoded = base64.b64encode(raw_bytes).decode("ascii")
@@ -833,15 +1409,17 @@ class InspectionRealRunner:
             }}
             const blob = new Blob([bytes], {{ type: {content_type!r} }});
             const formData = new FormData();
-            formData.append("cat", "default");
             formData.append("file", blob, {path.name!r});
+            formData.append("cat", "default");
             const xhr = new XMLHttpRequest();
             xhr.open("POST", "/api/upload", false);
             xhr.withCredentials = true;
+            xhr.setRequestHeader("Accept", "application/json, text/plain, */*");
             xhr.send(formData);
             return JSON.stringify({{
               status: xhr.status,
               url: xhr.responseURL || "",
+              contentType: xhr.getResponseHeader("content-type") || "",
               text: xhr.responseText || "",
             }});
           }} catch (error) {{
@@ -849,103 +1427,275 @@ class InspectionRealRunner:
               status: 0,
               error: String(error),
               url: window.location.href || "",
+              contentType: "",
+              text: "",
             }});
           }}
         }})()
         """
-        result = await browser.execute_js(script)
-        if not isinstance(result, dict):
-            raise _PtsRunnerError(
-                error_message="上传巡检报告返回非法结果",
-                error_type="response_invalid",
-                retryable=False,
+        max_attempts = 3
+        last_error: _PtsRunnerError | None = None
+        for attempt in range(1, max_attempts + 1):
+            result = await browser.execute_js_on_project(work_order_link, script)
+            if not isinstance(result, dict):
+                err = _PtsRunnerError(
+                    error_message=f"上传巡检报告返回非法结果 attempt={attempt}/{max_attempts}",
+                    error_type="response_invalid",
+                    retryable=attempt < max_attempts,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    last_error = err
+                    continue
+                raise err
+
+            status = int(result.get("status") or 0)
+            url = str(result.get("url") or "")
+            content_type_header = str(result.get("contentType") or "")
+            text = str(result.get("text") or "")
+            raw_error = str(result.get("error") or "")
+            if "pts.chaitin.net" not in url:
+                err = _PtsRunnerError(
+                    error_message=(
+                        "上传巡检报告时浏览器上下文异常: "
+                        f"url={self._truncate_runtime_text(url, 180)}; "
+                        f"attempt={attempt}/{max_attempts}"
+                    ),
+                    error_type="response_invalid",
+                    retryable=attempt < max_attempts,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    last_error = err
+                    continue
+                raise err
+            preview = self._truncate_runtime_text(text, 220)
+            detail = (
+                f"status={status}; attempt={attempt}/{max_attempts}; "
+                f"url={self._truncate_runtime_text(url, 180)}; "
+                f"content_type={self._truncate_runtime_text(content_type_header, 80)}; "
+                f"preview={preview}; raw_error={self._truncate_runtime_text(raw_error, 120)}"
             )
-        status = int(result.get("status") or 0)
-        url = str(result.get("url") or "")
-        text = str(result.get("text") or "")
-        if "auth.chaitin.net/login" in url or status in {401, 403}:
-            error_type = "permission_denied" if status == 403 else "session_expired"
-            error_message = (
-                "当前 PTS 账号无权上传巡检报告，请人工处理"
-                if status == 403
-                else "PTS 会话已失效，请重新登录 PTS 或更新 Cookie"
-            )
-            raise _PtsRunnerError(
-                error_message=error_message,
-                error_type=error_type,
-                retryable=False,
-                http_status=status or None,
-            )
-        if status >= 400:
-            raise _PtsRunnerError(
-                error_message=f"上传巡检报告失败: {status}",
-                error_type="http_error" if status >= 500 else "business_rejected",
-                retryable=status >= 500,
-                http_status=status,
-            )
-        try:
-            payload = json.loads(text)
-        except ValueError as exc:
-            raise _PtsRunnerError(
-                error_message="上传巡检报告返回非法 JSON",
-                error_type="response_invalid",
-                retryable=False,
-            ) from exc
-        return payload
+
+            if "auth.chaitin.net/login" in url or status in {401, 403}:
+                error_type = "permission_denied" if status == 403 else "session_expired"
+                error_message = (
+                    "当前 PTS 账号无权上传巡检报告，请人工处理"
+                    if status == 403
+                    else "PTS 会话已失效，请重新登录 PTS 或更新 Cookie"
+                )
+                raise _PtsRunnerError(
+                    error_message=f"{error_message}; {detail}",
+                    error_type=error_type,
+                    retryable=False,
+                    http_status=status or None,
+                )
+
+            if status >= 400:
+                retryable = status in {0, 404, 429} or status >= 500
+                err = _PtsRunnerError(
+                    error_message=f"上传巡检报告失败: {status}; {detail}",
+                    error_type="http_error" if status >= 500 else "business_rejected",
+                    retryable=retryable and attempt < max_attempts,
+                    http_status=status,
+                )
+                if retryable and attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    last_error = err
+                    continue
+                raise err
+
+            if not text.strip():
+                err = _PtsRunnerError(
+                    error_message=f"上传巡检报告返回空响应; {detail}",
+                    error_type="empty_response",
+                    retryable=attempt < max_attempts,
+                    http_status=status or None,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    last_error = err
+                    continue
+                raise err
+
+            try:
+                payload = json.loads(text)
+                return payload
+            except ValueError as exc:
+                err = _PtsRunnerError(
+                    error_message=f"上传巡检报告返回非法 JSON; {detail}",
+                    error_type="response_invalid",
+                    retryable=attempt < max_attempts,
+                    http_status=status or None,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.25 * attempt)
+                    last_error = err
+                    continue
+                raise err from exc
+
+        if last_error is not None:
+            raise last_error
+        raise _PtsRunnerError(
+            error_message="上传巡检报告失败: 未获取到有效响应",
+            error_type="response_invalid",
+            retryable=False,
+        )
 
     async def _pts_add_work_order_info(
         self,
         browser: _PtsBrowserSession,
         *,
         work_order_id: str,
+        work_order_link: str,
         customer_name: str,
         uploaded_file_ids: list[str],
+        uploaded_remote_files: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         del customer_name
-        # Chrome AppleScript execution is unstable with non-ASCII note payloads here.
-        note = "inspection report uploaded automatically"
-        try:
-            payload = await browser.graphql_payload(
-                {
-                    "operationName": "AddWorkOrderInfo",
-                    "variables": {
-                        "id": work_order_id,
-                        "note": note,
-                        "file": uploaded_file_ids,
-                    },
-                    "query": (
-                        "mutation AddWorkOrderInfo($id: ID!, $note: String, $file: [ID!]) { "
-                        "add_work_order_info(id: $id, note: $note, file: $file) "
-                        "}"
-                    ),
+        if not uploaded_file_ids:
+            return {
+                "action": "add_work_order_info",
+                "status": "failed",
+                "uploaded_file_ids": [],
+                "error_type": "attachment_bind_failed",
+                "error_message": "缺少可绑定的上传文件 ID，无法写入工单附件绑定信息",
+                "retryable": False,
+            }
+        note = self._build_uploaded_files_note(
+            uploaded_file_ids=uploaded_file_ids,
+            uploaded_remote_files=uploaded_remote_files or [],
+        )
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                open_result = await browser.open_project(work_order_link)
+                if str(open_result.get("status") or "") != "success":
+                    return {
+                        "action": "add_work_order_info",
+                        "status": "failed",
+                        "uploaded_file_ids": uploaded_file_ids,
+                        "error_type": "attachment_bind_failed",
+                        "error_message": f"写入工单处理记录前切换页面失败: {open_result.get('error_message') or 'unknown_error'}",
+                            "retryable": False,
+                    }
+                add_result = await self._submit_work_order_info_update(
+                    browser=browser,
+                    work_order_id=work_order_id,
+                    work_order_link=work_order_link,
+                    note=note,
+                    uploaded_file_ids=uploaded_file_ids,
+                )
+                if not add_result:
+                    return {
+                        "action": "add_work_order_info",
+                        "status": "failed",
+                        "uploaded_file_ids": uploaded_file_ids,
+                        "error_type": "attachment_bind_failed",
+                        "error_message": "工单处理记录写入未生效",
+                        "retryable": False,
+                    }
+                return {
+                    "action": "add_work_order_info",
+                    "status": "success",
+                    "uploaded_file_ids": uploaded_file_ids,
                 }
-            )
-            add_result = payload.get("add_work_order_info")
-            if not add_result:
+            except _PtsRunnerError as exc:
+                should_retry = (
+                    exc.error_type in {"business_rejected", "response_invalid", "http_error"}
+                    and attempt < max_attempts
+                )
+                if should_retry:
+                    # Recover to the expected PTS work-order page before retrying graphql mutation.
+                    await browser.open_project(work_order_link)
+                    await asyncio.sleep(0.25 * attempt)
+                    continue
+                mapped_error_type = (
+                    exc.error_type
+                    if exc.error_type in {"session_expired", "permission_denied"}
+                    else "attachment_bind_failed"
+                )
                 return {
                     "action": "add_work_order_info",
                     "status": "failed",
                     "uploaded_file_ids": uploaded_file_ids,
-                    "error_type": "business_rejected",
-                    "error_message": "工单处理记录写入未生效",
+                    "error_message": (
+                        f"{exc.error_message}; attempt={attempt}/{max_attempts}; "
+                        f"source_error_type={exc.error_type}; http_status={exc.http_status}"
+                    ),
+                    "error_type": mapped_error_type,
+                    "source_error_type": exc.error_type,
+                    "http_status": exc.http_status,
                     "retryable": False,
                 }
-            return {
-                "action": "add_work_order_info",
-                "status": "success",
-                "uploaded_file_ids": uploaded_file_ids,
-                "note": note,
+
+    async def _submit_work_order_info_update(
+        self,
+        *,
+        browser: _PtsBrowserSession,
+        work_order_id: str,
+        work_order_link: str,
+        note: str,
+        uploaded_file_ids: list[str],
+    ) -> bool:
+        # Primary path: bind attachments directly by work-order ID.
+        # This path works with executable runs and keeps attachment binding explicit.
+        payload = await browser.graphql_payload(
+            {
+                "operationName": "AddWorkOrderInfo",
+                "variables": {
+                    "id": work_order_id,
+                    "note": note,
+                    "file": uploaded_file_ids,
+                },
+                "query": (
+                    "mutation AddWorkOrderInfo($id: ID!, $note: String, $file: [ID!]) { "
+                    "add_work_order_info(id: $id, note: $note, file: $file) "
+                    "}"
+                ),
             }
-        except _PtsRunnerError as exc:
-            return {
-                "action": "add_work_order_info",
-                "status": "failed",
-                "uploaded_file_ids": uploaded_file_ids,
-                "error_message": exc.error_message,
-                "error_type": exc.error_type,
-                "http_status": exc.http_status,
-                "retryable": exc.retryable,
+        )
+        add_result = payload.get("add_work_order_info")
+        if isinstance(add_result, bool):
+            return add_result
+        if add_result:
+            return True
+
+        # Fallback path: some pages edit an existing info row via UpdateWorkOrderInfo.
+        # For this API, `id` must be info_id (not work_order_id), so we resolve latest info_id first.
+        runtime = await self._load_pts_runtime(
+            browser,
+            work_order_id=work_order_id,
+            work_order_link=work_order_link,
+        )
+        info_list = runtime.get("info_list") or []
+        info_id = ""
+        for info in reversed(info_list):
+            info_id = str((info or {}).get("id") or "").strip()
+            if info_id:
+                break
+        if not info_id:
+            return False
+
+        fallback_payload = await browser.graphql_payload(
+            {
+                "operationName": "UpdateWorkOrderInfo",
+                "variables": {
+                    "id": info_id,
+                    "note": note,
+                    "file": uploaded_file_ids,
+                },
+                "query": (
+                    "mutation UpdateWorkOrderInfo($id: ID!, $note: String, $file: [ID!]) { "
+                    "update_work_order_info(id: $id, note: $note, file: $file) "
+                    "}"
+                ),
             }
+        )
+        update_result = fallback_payload.get("update_work_order_info")
+        if isinstance(update_result, bool):
+            return update_result
+        return bool(update_result)
 
     async def _pts_complete_work_order(
         self,
@@ -1063,6 +1813,7 @@ class InspectionRealRunner:
                 "uploaded_file_ids_found": attachment_check["uploaded_file_ids_found"],
                 "uploaded_filenames_expected": attachment_check["uploaded_filenames_expected"],
                 "uploaded_filenames_found": attachment_check["uploaded_filenames_found"],
+                "attachment_match_mode": attachment_check["attachment_match_mode"],
             }
         return {
             "action": "postcheck_inspection_closure",
@@ -1077,6 +1828,7 @@ class InspectionRealRunner:
             "uploaded_file_ids_found": attachment_check["uploaded_file_ids_found"],
             "uploaded_filenames_expected": attachment_check["uploaded_filenames_expected"],
             "uploaded_filenames_found": attachment_check["uploaded_filenames_found"],
+            "attachment_match_mode": attachment_check["attachment_match_mode"],
             "error_type": "postcheck_failed",
             "error_message": "巡检工单动作已执行，但最终校验未通过",
             "retryable": False,
@@ -1112,17 +1864,19 @@ class InspectionRealRunner:
                 "uploaded_file_ids_found": attachment_check["uploaded_file_ids_found"],
                 "uploaded_filenames_expected": attachment_check["uploaded_filenames_expected"],
                 "uploaded_filenames_found": attachment_check["uploaded_filenames_found"],
+                "attachment_match_mode": attachment_check["attachment_match_mode"],
             }
         return {
             "action": "precheck_uploaded_attachments",
             "status": "failed",
-            "error_type": "upload_failed",
+            "error_type": "attachment_bind_failed",
             "error_message": "巡检报告未出现在工单附件中",
             "retryable": False,
             "uploaded_file_ids_expected": [str(item).strip() for item in uploaded_file_ids if str(item).strip()],
             "uploaded_file_ids_found": attachment_check["uploaded_file_ids_found"],
             "uploaded_filenames_expected": attachment_check["uploaded_filenames_expected"],
             "uploaded_filenames_found": attachment_check["uploaded_filenames_found"],
+            "attachment_match_mode": attachment_check["attachment_match_mode"],
         }
 
     @staticmethod
@@ -1162,20 +1916,24 @@ class InspectionRealRunner:
                 "uploaded_file_ids_found": [],
                 "uploaded_filenames_expected": [],
                 "uploaded_filenames_found": [],
+                "attachment_match_mode": "none",
             }
         found_ids = [item for item in expected_ids if item in attached_ids]
         found_filenames = [item for item in expected_filenames if item in attached_filenames]
         if expected_ids:
             report_attached_confirmed = set(found_ids) == set(expected_ids)
+            match_mode = "file_id"
         else:
             report_attached_confirmed = bool(
                 expected_filenames and set(found_filenames) == set(expected_filenames)
             )
+            match_mode = "filename_fallback"
         return {
             "report_attached_confirmed": report_attached_confirmed,
             "uploaded_file_ids_found": found_ids,
             "uploaded_filenames_expected": expected_filenames,
             "uploaded_filenames_found": found_filenames,
+            "attachment_match_mode": match_mode,
         }
 
     @staticmethod
@@ -1193,6 +1951,17 @@ class InspectionRealRunner:
             if filename:
                 filenames.append(filename)
         return list(dict.fromkeys(filenames))
+
+    @staticmethod
+    def _build_uploaded_files_note(
+        *,
+        uploaded_file_ids: list[str],
+        uploaded_remote_files: list[dict[str, Any]],
+    ) -> str:
+        # Keep note empty so PTS timeline focuses on real attached Word files.
+        # Attachment binding is done by `file` IDs in mutation payload.
+        del uploaded_file_ids, uploaded_remote_files
+        return ""
 
     @staticmethod
     def _normalize_filename_list(items: list[str]) -> list[str]:
@@ -1565,6 +2334,14 @@ def _resolve_work_order_id(context: ExecutorContext) -> str | None:
     if work_order_id:
         return str(work_order_id)
     work_order_link = context.normalized_data.get("work_order_link")
+    if not work_order_link:
+        return None
+    parsed = urlparse(str(work_order_link))
+    tail = parsed.path.rstrip("/").split("/")[-1]
+    return tail or None
+
+
+def _resolve_work_order_id_from_link(work_order_link: str | None) -> str | None:
     if not work_order_link:
         return None
     parsed = urlparse(str(work_order_link))

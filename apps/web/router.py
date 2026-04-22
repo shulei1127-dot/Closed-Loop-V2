@@ -56,36 +56,24 @@ def root() -> RedirectResponse:
 
 @router.get("/console", response_class=HTMLResponse)
 def console_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
-    ops_service = OpsService(db)
     pts_session_status = PtsSessionService().get_status()
     inspection_month = request.query_params.get("inspection_month") or datetime.now(LOCAL_TZ).strftime("%Y-%m")
-    available_inspection_months = ops_service.list_pending_inspection_months()
-    if inspection_month not in available_inspection_months and available_inspection_months:
-        inspection_month = available_inspection_months[0]
     return templates.TemplateResponse(
         name="console/dashboard.html",
         request=request,
         context={
             "page_title": "模块总览",
-            "module_summaries": [item.model_dump() for item in ops_service.build_overview()],
-            "failure_items": [item.model_dump() for item in ops_service.list_failures(limit=10)],
-            "manual_required_items": [item.model_dump() for item in ops_service.list_manual_required(limit=10)],
-            "pending_visit_items": [
-                item.model_dump()
-                for item in ops_service.list_pending_tasks(module_code="visit", limit=20, visit_owner="舒磊")
-            ],
-            "pending_inspection_items": [
-                item.model_dump()
-                for item in ops_service.list_pending_tasks(module_code="inspection", limit=50, month=inspection_month)
-            ],
+            "module_summaries": [],
+            "failure_items": [],
+            "manual_required_items": [],
+            "pending_visit_items": [],
+            "pending_inspection_items": [],
             "inspection_month": inspection_month,
-            "available_inspection_months": available_inspection_months,
-            "recent_inspection_closures": [
-                item.model_dump()
-                for item in ops_service.list_recent_inspection_closures(month=inspection_month, limit=10)
-            ],
-            "recent_visit_links": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=10)],
+            "available_inspection_months": [inspection_month],
+            "recent_inspection_closures": [],
+            "recent_visit_links": [],
             "pts_session_status": pts_session_status,
+            "defer_dashboard_data": True,
             "active_nav": "dashboard",
         },
     )
@@ -93,36 +81,21 @@ def console_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLRe
 
 @router.get("/console/modules/visit", response_class=HTMLResponse)
 def console_visit_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
-    ops_service = OpsService(db)
-    module_summary_map = {item.module_code: item.model_dump() for item in ops_service.build_overview()}
     selected_visit_owner = (request.query_params.get("visit_owner") or "").strip()
-    visit_owner_filter = None if selected_visit_owner in {"", "all", "全部"} else selected_visit_owner
-    pending_visit_items = [
-        item.model_dump()
-        for item in ops_service.list_pending_tasks(
-            module_code="visit",
-            limit=200,
-            visit_owner=visit_owner_filter,
-        )
-    ]
-    pending_visit_executable_count = sum(1 for item in pending_visit_items if item.get("can_execute"))
-    pending_visit_total_count = len(ops_service.list_pending_tasks(module_code="visit", limit=5000, visit_owner=None))
-    available_visit_owners = ops_service.list_visit_owners()
-    if selected_visit_owner and selected_visit_owner not in {"all", "全部", *available_visit_owners}:
-        available_visit_owners = sorted({*available_visit_owners, selected_visit_owner})
     return templates.TemplateResponse(
         name="console/module_visit.html",
         request=request,
         context={
             "page_title": "交付转售后回访",
-            "module_summary": module_summary_map.get("visit"),
-            "pending_visit_items": pending_visit_items,
-            "pending_visit_executable_count": pending_visit_executable_count,
-            "pending_visit_filtered_count": len(pending_visit_items),
-            "pending_visit_total_count": pending_visit_total_count,
+            "module_summary": None,
+            "pending_visit_items": [],
+            "pending_visit_executable_count": 0,
+            "pending_visit_filtered_count": 0,
+            "pending_visit_total_count": 0,
             "selected_visit_owner": selected_visit_owner,
-            "available_visit_owners": available_visit_owners,
-            "recent_visit_links": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=20)],
+            "available_visit_owners": [],
+            "recent_visit_links": [],
+            "defer_module_data": True,
             "active_nav": "module_visit",
         },
     )
@@ -130,32 +103,19 @@ def console_visit_module(request: Request, db: Session = Depends(get_db)) -> HTM
 
 @router.get("/console/modules/inspection", response_class=HTMLResponse)
 def console_inspection_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
-    ops_service = OpsService(db)
-    module_summary_map = {item.module_code: item.model_dump() for item in ops_service.build_overview()}
     inspection_month = request.query_params.get("inspection_month") or datetime.now(LOCAL_TZ).strftime("%Y-%m")
-    available_inspection_months = ops_service.list_pending_inspection_months()
-    available_sync_months = ops_service.list_known_inspection_months()
-    if inspection_month not in available_sync_months:
-        available_sync_months = sorted({*available_sync_months, inspection_month}, reverse=True)
-    if inspection_month not in available_inspection_months and available_inspection_months:
-        inspection_month = available_inspection_months[0]
     return templates.TemplateResponse(
         name="console/module_inspection.html",
         request=request,
         context={
             "page_title": "巡检工单闭环",
-            "module_summary": module_summary_map.get("inspection"),
-            "pending_inspection_items": [
-                item.model_dump()
-                for item in ops_service.list_pending_tasks(module_code="inspection", limit=100, month=inspection_month)
-            ],
+            "module_summary": None,
+            "pending_inspection_items": [],
             "inspection_month": inspection_month,
-            "available_inspection_months": available_inspection_months,
-            "available_sync_months": available_sync_months,
-            "recent_inspection_closures": [
-                item.model_dump()
-                for item in ops_service.list_recent_inspection_closures(month=inspection_month, limit=10)
-            ],
+            "available_inspection_months": [inspection_month],
+            "available_sync_months": [inspection_month],
+            "recent_inspection_closures": [],
+            "defer_module_data": True,
             "active_nav": "module_inspection",
         },
     )
@@ -163,17 +123,17 @@ def console_inspection_module(request: Request, db: Session = Depends(get_db)) -
 
 @router.get("/console/modules/proactive", response_class=HTMLResponse)
 def console_proactive_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
-    ops_service = OpsService(db)
-    module_summary_map = {item.module_code: item.model_dump() for item in ops_service.build_overview()}
+    selected_visit_owner = (request.query_params.get("visit_owner") or "").strip()
     return templates.TemplateResponse(
         name="console/module_proactive.html",
         request=request,
         context={
             "page_title": "超半年主动回访",
-            "module_summary": module_summary_map.get("proactive"),
-            "pending_proactive_items": [
-                item.model_dump() for item in ops_service.list_pending_tasks(module_code="proactive", limit=100)
-            ],
+            "module_summary": None,
+            "pending_proactive_items": [],
+            "selected_visit_owner": selected_visit_owner,
+            "available_visit_owners": [],
+            "defer_module_data": True,
             "active_nav": "module_proactive",
         },
     )

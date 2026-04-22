@@ -8,6 +8,7 @@ from typing import Any
 from core.config import get_settings
 from core.db import SessionLocal
 from core.runtime_state import runtime_state
+from repositories.task_batch_repo import TaskBatchRepository
 from services.task_execution_service import TaskExecutionService
 
 
@@ -41,13 +42,13 @@ class TaskDispatcher:
         self._workers: list[asyncio.Task[Any]] = []
         self._started = False
         self._lock = asyncio.Lock()
-        self._jobs: dict[str, dict[str, Any]] = {}
-        self._batches: dict[str, dict[str, Any]] = {}
-
     async def start(self) -> None:
         async with self._lock:
             if self._started:
                 return
+            with SessionLocal() as db:
+                TaskBatchRepository(db).recover_stale_incomplete_jobs()
+                db.commit()
             self._started = True
             self._workers = [
                 asyncio.create_task(self._worker_loop(index), name=f"task-dispatcher-{index}")
@@ -78,130 +79,84 @@ class TaskDispatcher:
         trigger: str,
     ) -> dict[str, Any]:
         batch_id = str(uuid.uuid4())
-        batch = self._new_batch(batch_id=batch_id, module_code=module_code, dry_run=dry_run, trigger=trigger)
-        async with self._lock:
-            self._batches[batch_id] = batch
         items: list[dict[str, Any]] = []
+        enqueued_jobs: list[dict[str, Any]] = []
+        with SessionLocal() as db:
+            repo = TaskBatchRepository(db)
+            repo.create_batch(
+                batch_id=uuid.UUID(batch_id),
+                module_code=module_code,
+                dry_run=dry_run,
+                trigger=trigger,
+                note="批次状态已持久化：服务重启后仍可查看执行结果与失败明细。",
+            )
 
-        for task_plan_id in task_plan_ids:
-            async with self._lock:
-                batch["requested_count"] += 1
-            accepted = runtime_state.acquire_queued_task(task_plan_id)
-            if not accepted:
-                async with self._lock:
-                    batch["duplicate_count"] += 1
+            for task_plan_id in task_plan_ids:
+                accepted = runtime_state.acquire_queued_task(task_plan_id)
+                if not accepted:
+                    repo.increment_duplicate_count(uuid.UUID(batch_id))
+                    items.append(
+                        {
+                            "job_id": None,
+                            "task_plan_id": task_plan_id,
+                            "accepted": False,
+                            "status": "duplicate",
+                            "message": "该任务已在队列或执行中",
+                        }
+                    )
+                    continue
+
+                job_id = str(uuid.uuid4())
+                repo.create_job(
+                    job_id=uuid.UUID(job_id),
+                    batch_id=uuid.UUID(batch_id),
+                    task_plan_id=uuid.UUID(task_plan_id),
+                )
+                job = {
+                    "job_id": job_id,
+                    "batch_id": batch_id,
+                    "module_code": module_code,
+                    "task_plan_id": task_plan_id,
+                    "dry_run": dry_run,
+                    "trigger": trigger,
+                }
+                enqueued_jobs.append(job)
                 items.append(
                     {
-                        "job_id": None,
+                        "job_id": job_id,
                         "task_plan_id": task_plan_id,
-                        "accepted": False,
-                        "status": "duplicate",
-                        "message": "该任务已在队列或执行中",
+                        "accepted": True,
+                        "status": "queued",
+                        "message": None,
                     }
                 )
-                continue
+            db.commit()
 
-            job_id = str(uuid.uuid4())
-            now = _utc_now_iso()
-            job = {
-                "job_id": job_id,
-                "batch_id": batch_id,
-                "module_code": module_code,
-                "task_plan_id": task_plan_id,
-                "dry_run": dry_run,
-                "trigger": trigger,
-                "status": "queued",
-                "run_status": None,
-                "manual_required": False,
-                "task_run_id": None,
-                "error_message": None,
-                "created_at": now,
-                "started_at": None,
-                "finished_at": None,
-            }
-            async with self._lock:
-                batch["enqueued_count"] += 1
-                batch["queued_count"] += 1
-                batch["job_ids"].append(job_id)
-                self._jobs[job_id] = job
+        for job in enqueued_jobs:
             await self._queue.put(job)
-            items.append(
-                {
-                    "job_id": job_id,
-                    "task_plan_id": task_plan_id,
-                    "accepted": True,
-                    "status": "queued",
-                    "message": None,
-                }
-            )
+
+        batch_status = await self.get_batch_status(batch_id)
+        if batch_status is None:
+            requested_count = len(task_plan_ids)
+            enqueued_count = len(enqueued_jobs)
+            duplicate_count = requested_count - enqueued_count
+        else:
+            requested_count = int(batch_status.get("requested_count") or 0)
+            enqueued_count = int(batch_status.get("enqueued_count") or 0)
+            duplicate_count = int(batch_status.get("duplicate_count") or 0)
 
         return {
             "batch_id": batch_id,
             "module_code": module_code,
-            "requested_count": batch["requested_count"],
-            "enqueued_count": batch["enqueued_count"],
-            "duplicate_count": batch["duplicate_count"],
+            "requested_count": requested_count,
+            "enqueued_count": enqueued_count,
+            "duplicate_count": duplicate_count,
             "items": items,
         }
 
     async def get_batch_status(self, batch_id: str) -> dict[str, Any] | None:
-        async with self._lock:
-            batch = self._batches.get(batch_id)
-            if batch is None:
-                return None
-            job_ids = list(batch["job_ids"])
-            jobs = [dict(self._jobs[job_id]) for job_id in job_ids if job_id in self._jobs]
-            done = batch["finished_count"] >= batch["enqueued_count"]
-            if done:
-                status = "completed"
-            elif batch["running_count"] > 0:
-                status = "running"
-            elif batch["queued_count"] > 0:
-                status = "queued"
-            else:
-                status = "pending"
-            return {
-                "batch_id": batch_id,
-                "module_code": batch["module_code"],
-                "created_at": batch["created_at"],
-                "completed_at": batch["completed_at"],
-                "requested_count": batch["requested_count"],
-                "enqueued_count": batch["enqueued_count"],
-                "duplicate_count": batch["duplicate_count"],
-                "queued_count": batch["queued_count"],
-                "running_count": batch["running_count"],
-                "finished_count": batch["finished_count"],
-                "closed_success_count": batch["closed_success_count"],
-                "failed_count": batch["failed_count"],
-                "manual_required_count": batch["manual_required_count"],
-                "pending_confirmation_count": batch["pending_confirmation_count"],
-                "status": status,
-                "done": done,
-                "jobs": jobs,
-                "ephemeral": True,
-                "note": "进程内队列：服务重启后 queued/running/batch 状态会丢失（phase-1 可接受）。",
-            }
-
-    def _new_batch(self, *, batch_id: str, module_code: str, dry_run: bool, trigger: str) -> dict[str, Any]:
-        return {
-            "batch_id": batch_id,
-            "module_code": module_code,
-            "dry_run": dry_run,
-            "trigger": trigger,
-            "created_at": _utc_now_iso(),
-            "completed_at": None,
-            "requested_count": 0,
-            "enqueued_count": 0,
-            "duplicate_count": 0,
-            "queued_count": 0,
-            "running_count": 0,
-            "finished_count": 0,
-            "closed_success_count": 0,
-            "failed_count": 0,
-            "manual_required_count": 0,
-            "pending_confirmation_count": 0,
-            "job_ids": [],
-        }
+        with SessionLocal() as db:
+            return TaskBatchRepository(db).get_batch_status(uuid.UUID(batch_id))
 
     async def _worker_loop(self, worker_index: int) -> None:
         while True:
@@ -247,18 +202,10 @@ class TaskDispatcher:
             )
 
     async def _mark_job_running(self, job: dict[str, Any]) -> None:
-        now = _utc_now_iso()
-        async with self._lock:
-            current_job = self._jobs.get(job["job_id"])
-            if current_job is None:
-                return
-            current_job["status"] = "running"
-            current_job["started_at"] = now
-            batch = self._batches.get(job["batch_id"])
-            if batch is None:
-                return
-            batch["queued_count"] = max(0, batch["queued_count"] - 1)
-            batch["running_count"] += 1
+        with SessionLocal() as db:
+            repo = TaskBatchRepository(db)
+            repo.mark_job_running(uuid.UUID(job["job_id"]))
+            db.commit()
 
     async def _mark_job_finished(
         self,
@@ -270,33 +217,18 @@ class TaskDispatcher:
         terminal_status: str,
         error_message: str | None,
     ) -> None:
-        now = _utc_now_iso()
-        async with self._lock:
-            current_job = self._jobs.get(job["job_id"])
-            if current_job is None:
-                return
-            current_job["status"] = "finished"
-            current_job["run_status"] = run_status
-            current_job["task_run_id"] = task_run_id
-            current_job["manual_required"] = bool(manual_required)
-            current_job["error_message"] = error_message
-            current_job["finished_at"] = now
-
-            batch = self._batches.get(job["batch_id"])
-            if batch is None:
-                return
-            batch["running_count"] = max(0, batch["running_count"] - 1)
-            batch["finished_count"] += 1
-            if terminal_status == "closed_success":
-                batch["closed_success_count"] += 1
-            elif terminal_status == "manual_required":
-                batch["manual_required_count"] += 1
-            elif terminal_status == "pending_confirmation":
-                batch["pending_confirmation_count"] += 1
-            else:
-                batch["failed_count"] += 1
-            if batch["finished_count"] >= batch["enqueued_count"] and batch["completed_at"] is None:
-                batch["completed_at"] = now
+        parsed_task_run_id = uuid.UUID(task_run_id) if task_run_id else None
+        with SessionLocal() as db:
+            repo = TaskBatchRepository(db)
+            repo.mark_job_finished(
+                uuid.UUID(job["job_id"]),
+                run_status=run_status,
+                task_run_id=parsed_task_run_id,
+                manual_required=manual_required,
+                terminal_status=terminal_status,
+                error_message=error_message,
+            )
+            db.commit()
 
 
 _dispatcher: TaskDispatcher | None = None

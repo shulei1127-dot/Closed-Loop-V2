@@ -6,6 +6,7 @@ from services.executors.schemas import ExecutorContext
 
 
 VISIT_TYPE_MAP = {
+    "__default__": "customer_satisfaction",
     "交付回访": "delivery_followup",
     "售后回访": "after_sales_followup",
     "客户满意度调研": "customer_satisfaction",
@@ -17,7 +18,7 @@ class VisitActionBuilder:
     def build(self, context: ExecutorContext) -> tuple[list[dict[str, Any]], str | None]:
         data = context.normalized_data
         visit_type = data.get("visit_type")
-        mapped_type = VISIT_TYPE_MAP.get(str(visit_type)) if visit_type else None
+        mapped_type = VISIT_TYPE_MAP.get(str(visit_type)) if visit_type else VISIT_TYPE_MAP["__default__"]
         if mapped_type is None:
             return [], f"visit_type `{visit_type}` 暂不支持自动执行"
 

@@ -254,7 +254,7 @@ def dingtalk_parallelv2_server() -> Generator[dict, None, None]:
                     "headers": {key: value for key, value in self.headers.items()},
                 }
             )
-            if self.path == "/api/document/data":
+            if self.path.startswith("/api/document/data"):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -271,6 +271,20 @@ def dingtalk_parallelv2_server() -> Generator[dict, None, None]:
                     "headers": {key: value for key, value in self.headers.items()},
                 }
             )
+            if self.path.startswith("/core/api/accessToken"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "isSuccess": True,
+                            "status": 200,
+                            "data": "offline-visit-access-token",
+                        }
+                    ).encode("utf-8")
+                )
+                return
             if self.path.startswith("/nt/api/sheets/Igz9TVd/record/count"):
                 if self.headers.get("A-Token") != "offline-visit-access-token":
                     self.send_response(401)

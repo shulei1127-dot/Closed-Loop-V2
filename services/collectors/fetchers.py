@@ -9,6 +9,10 @@ from urllib.parse import urljoin
 import httpx
 
 from core.config import get_settings
+from services.collectors.dingtalk_browser_auth import (
+    DingtalkBrowserAuthError,
+    resolve_dingtalk_browser_auth,
+)
 from services.collectors.dingtalk_parallelv2_decoder import (
     decode_parallelv2_bytes,
     parse_document_data_structure,
@@ -205,10 +209,15 @@ class DingtalkPayloadFetcher:
                 "transport_mode": self.transport_mode,
                 "request_url": request["url"],
                 "http_status": response.status_code,
+                "auth_source": request.get("auth_meta", {}).get("auth_source"),
+                "auth_cookie_count": request.get("auth_meta", {}).get("cookie_count"),
             },
         }
 
     async def _fetch_parallelv2_structured(self, config: ModuleSourceConfig) -> dict[str, Any]:
+        if bool(config.get_extra("parallelv2_direct_access_token_enabled")):
+            return await self._fetch_parallelv2_structured_via_access_token(config)
+
         document_endpoint = config.get_extra("structured_endpoint")
         record_count_endpoint = config.get_extra("record_count_endpoint")
         parallelv2_endpoint = config.get_extra("parallelv2_endpoint")
@@ -281,6 +290,9 @@ class DingtalkPayloadFetcher:
                 "document_http_status": document_response.status_code,
                 "record_count_http_status": record_count_response.status_code,
                 "parallelv2_http_status": parallelv2_response.status_code,
+                "auth_source": document_request.get("auth_meta", {}).get("auth_source"),
+                "auth_cookie_count": document_request.get("auth_meta", {}).get("cookie_count"),
+                "auth_matched_hosts": document_request.get("auth_meta", {}).get("matched_hosts", []),
                 "decoder": decoded_payload["diagnostics"],
                 "document_structure": {
                     "raw_columns": structure.raw_columns,
@@ -290,15 +302,160 @@ class DingtalkPayloadFetcher:
             },
         }
 
+    async def _fetch_parallelv2_structured_via_access_token(self, config: ModuleSourceConfig) -> dict[str, Any]:
+        parallelv2_endpoint = config.get_extra("parallelv2_endpoint")
+        if not parallelv2_endpoint:
+            raise ConfigurationMissingError("direct parallelV2 collector requires parallelv2_endpoint")
+
+        sheet_id = str(config.get_extra("parallelv2_sheet_id") or "")
+        view_id = str(config.get_extra("parallelv2_view_id") or "")
+        doc_key = str(config.get_extra("parallelv2_doc_key") or config.source_doc_key or "")
+        dentry_key = str(config.get_extra("parallelv2_dentry_key") or "")
+        if not sheet_id or not view_id or not doc_key or not dentry_key:
+            raise ConfigurationMissingError(
+                "direct parallelV2 collector requires parallelv2_sheet_id, parallelv2_view_id, parallelv2_doc_key, and parallelv2_dentry_key"
+            )
+
+        access_token_endpoint = str(config.get_extra("parallelv2_access_token_endpoint", "/core/api/accessToken"))
+        access_token_request = self._build_request(config, step="parallelv2_access_token", endpoint=access_token_endpoint)
+        access_token_response = await self._send_request(step="parallelv2_access_token", request=access_token_request)
+        if not access_token_response.text.strip():
+            raise EmptyResponseError(
+                "parallelv2_access_token response body is empty",
+                http_status=access_token_response.status_code,
+            )
+        try:
+            access_token_payload = access_token_response.json()
+        except ValueError as exc:
+            raise PayloadParseError("parallelv2_access_token response is not valid JSON") from exc
+        access_token = self._extract_direct_access_token(access_token_payload)
+        if not access_token:
+            raise PayloadParseError("parallelv2_access_token response missing token")
+
+        document_payload: dict[str, Any] | None = None
+        document_request: dict[str, Any] | None = None
+        document_response: httpx.Response | None = None
+        structure_source = "fixture_structure_payload"
+        version_source = "query_params"
+        if bool(config.get_extra("parallelv2_dynamic_version_enabled")):
+            document_payload, document_request, document_response = await self._fetch_parallelv2_document_data(
+                config=config,
+                access_token=access_token,
+                doc_key=doc_key,
+                dentry_key=dentry_key,
+            )
+            document_access_token = self._extract_parallelv2_access_token(config, document_payload)
+            if document_access_token:
+                access_token = document_access_token
+            structure_payload = document_payload
+            structure_source = "live_document_data"
+            version_source = "live_document_data_checkpoint"
+            parallelv2_version = self._extract_parallelv2_version(
+                config,
+                document_payload,
+                allow_query_fallback=False,
+            )
+            if parallelv2_version is None:
+                raise PayloadParseError("parallelv2 live document_data missing checkpoint baseVersion")
+        else:
+            structure_payload = self._load_parallelv2_structure_payload(config)
+            parallelv2_version = self._extract_parallelv2_version(
+                config,
+                structure_payload,
+                allow_query_fallback=True,
+            )
+
+        structure = parse_document_data_structure(structure_payload, sheet_id=sheet_id, view_id=view_id)
+
+        parallelv2_request = self._build_request(config, step="parallelv2", endpoint=str(parallelv2_endpoint))
+        parallelv2_request["headers"] = {
+            **parallelv2_request["headers"],
+            str(config.get_extra("parallelv2_token_header", "A-Token")): access_token,
+            "A-DOC-KEY": doc_key,
+            "A-DENTRY-KEY": dentry_key,
+        }
+        if parallelv2_version is not None:
+            parallelv2_request["params"] = {
+                **parallelv2_request["params"],
+                "version": parallelv2_version,
+            }
+        parallelv2_response = await self._send_request(step="parallelv2", request=parallelv2_request)
+        if not parallelv2_response.content:
+            raise EmptyResponseError("parallelv2 response body is empty", http_status=parallelv2_response.status_code)
+
+        decoded_payload = decode_parallelv2_bytes(parallelv2_response.content, structure=structure)
+        return {
+            "data_source": "parallelv2_binary",
+            "raw_columns": structure.raw_columns,
+            "raw_rows": decoded_payload["rows"],
+            "raw_meta": {
+                "sheet_id": sheet_id,
+                "view_id": view_id,
+                "record_count": len(decoded_payload["rows"]),
+                "data_source": "parallelv2_binary",
+                "parallelv2_version": parallelv2_request["params"].get("version"),
+                "parallelv2_version_source": version_source,
+                "parallelv2_dynamic_version_enabled": bool(config.get_extra("parallelv2_dynamic_version_enabled")),
+                "transport_mode": self.transport_mode,
+                "access_token_request_url": access_token_request["url"],
+                "document_request_url": document_request["url"] if document_request else None,
+                "parallelv2_request_url": parallelv2_request["url"],
+                "access_token_http_status": access_token_response.status_code,
+                "document_http_status": document_response.status_code if document_response else None,
+                "parallelv2_http_status": parallelv2_response.status_code,
+                "auth_source": access_token_request.get("auth_meta", {}).get("auth_source"),
+                "auth_cookie_count": access_token_request.get("auth_meta", {}).get("cookie_count"),
+                "auth_matched_hosts": access_token_request.get("auth_meta", {}).get("matched_hosts", []),
+                "decoder": decoded_payload["diagnostics"],
+                "document_structure": {
+                    "raw_columns": structure.raw_columns,
+                    "view_field_ids": structure.view_field_ids,
+                    "record_ids_count": len(structure.record_ids),
+                    "source": structure_source,
+                },
+                "access_token_source": "core_api_accessToken",
+            },
+        }
+
+    async def _fetch_parallelv2_document_data(
+        self,
+        *,
+        config: ModuleSourceConfig,
+        access_token: str,
+        doc_key: str,
+        dentry_key: str,
+    ) -> tuple[dict[str, Any], dict[str, Any], httpx.Response]:
+        endpoint = str(config.get_extra("parallelv2_document_data_endpoint", "/api/document/data"))
+        request = self._build_request(config, step="parallelv2_document_data", endpoint=endpoint)
+        request["headers"] = {
+            **request["headers"],
+            str(config.get_extra("parallelv2_token_header", "A-Token")): access_token,
+            "A-DOC-KEY": doc_key,
+            "A-DENTRY-KEY": dentry_key,
+        }
+        if request.get("json_body") is None:
+            request["json_body"] = {"pageMode": 2}
+        response = await self._send_request(step="parallelv2_document_data", request=request)
+        if not response.text.strip():
+            raise EmptyResponseError("parallelv2_document_data response body is empty", http_status=response.status_code)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise PayloadParseError("parallelv2_document_data response is not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise PayloadParseError("parallelv2_document_data response must be JSON object")
+        return payload, request, response
+
     def _build_request(self, config: ModuleSourceConfig, *, step: str, endpoint: str) -> dict[str, Any]:
         url = endpoint if endpoint.startswith("http://") or endpoint.startswith("https://") else urljoin(config.source_url, endpoint)
+        browser_auth = self._resolve_browser_auth(config=config, endpoint=url)
         method = str(config.get_extra(f"{step}_method", "GET")).upper()
         params = config.get_extra(f"{step}_query_params", {})
         json_body = config.get_extra(f"{step}_json_body")
-        headers = self._build_headers(config, step=step)
+        headers = self._build_headers(config, step=step, browser_auth=browser_auth)
         headers.setdefault("Cache-Control", "no-cache")
         headers.setdefault("Pragma", "no-cache")
-        cookies = self._build_cookies(config)
+        cookies = self._build_cookies(config, browser_auth=browser_auth)
         timeout = float(config.get_extra("request_timeout_seconds", self.settings.dingtalk_request_timeout_seconds))
         verify_ssl = bool(config.get_extra("verify_ssl", self.settings.dingtalk_verify_ssl))
         request_params = dict(params) if isinstance(params, dict) else {}
@@ -312,7 +469,38 @@ class DingtalkPayloadFetcher:
             "cookies": cookies,
             "timeout": timeout,
             "verify_ssl": verify_ssl,
+            "auth_meta": {
+                "auth_source": browser_auth.get("auth_source") if isinstance(browser_auth, dict) else None,
+                "cookie_count": len(browser_auth.get("cookies", {})) if isinstance(browser_auth, dict) else 0,
+                "matched_hosts": browser_auth.get("matched_hosts", []) if isinstance(browser_auth, dict) else [],
+                "browser_auth_error": browser_auth.get("error") if isinstance(browser_auth, dict) else None,
+            },
         }
+
+    @staticmethod
+    def _extract_direct_access_token(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            raise PayloadParseError("parallelv2_access_token response must be JSON object")
+        token = payload.get("data") or payload.get("token")
+        if token is None:
+            return None
+        if not isinstance(token, str):
+            raise PayloadParseError("parallelv2_access_token token must be a string")
+        return token
+
+    @staticmethod
+    def _load_parallelv2_structure_payload(config: ModuleSourceConfig) -> dict[str, Any]:
+        inline_payload = config.get_extra("parallelv2_structure_payload")
+        if isinstance(inline_payload, dict):
+            return inline_payload
+        payload_path = config.resolve_path("parallelv2_structure_payload_path")
+        if payload_path is None:
+            raise ConfigurationMissingError(
+                "direct parallelV2 collector requires parallelv2_structure_payload or parallelv2_structure_payload_path"
+            )
+        if not payload_path.exists():
+            raise ConfigurationMissingError(f"parallelv2 structure payload path missing: {payload_path}")
+        return _read_json(payload_path)
 
     async def _send_request(self, *, step: str, request: dict[str, Any]) -> httpx.Response:
         async with httpx.AsyncClient(
@@ -332,8 +520,9 @@ class DingtalkPayloadFetcher:
                 raise RequestFailedError(f"{step} request failed: {exc}") from exc
 
         if response.status_code in {401, 403}:
+            auth_meta = request.get("auth_meta", {}) if isinstance(request.get("auth_meta"), dict) else {}
             raise AuthenticationFailedError(
-                f"{step} request authentication failed with status {response.status_code}",
+                f"{step} request authentication failed with status {response.status_code}; auth_source={auth_meta.get('auth_source')}; browser_auth_error={auth_meta.get('browser_auth_error')}",
                 http_status=response.status_code,
             )
         if response.status_code >= 400:
@@ -343,7 +532,7 @@ class DingtalkPayloadFetcher:
             )
         return response
 
-    def _build_headers(self, config: ModuleSourceConfig, *, step: str) -> dict[str, str]:
+    def _build_headers(self, config: ModuleSourceConfig, *, step: str, browser_auth: dict[str, Any] | None = None) -> dict[str, str]:
         headers: dict[str, str] = {}
         headers.update({str(k): str(v) for k, v in _parse_json_mapping(self.settings.dingtalk_default_headers_json, label="DINGTALK_DEFAULT_HEADERS_JSON").items()})
 
@@ -371,9 +560,12 @@ class DingtalkPayloadFetcher:
             prefix = str(config.get_extra("token_prefix", default_prefix))
             headers[header_name] = f"{prefix}{token_env_value}" if prefix else token_env_value
 
+        if isinstance(browser_auth, dict):
+            headers.update({str(k): str(v) for k, v in (browser_auth.get("headers") or {}).items()})
+
         return headers
 
-    def _build_cookies(self, config: ModuleSourceConfig) -> dict[str, str]:
+    def _build_cookies(self, config: ModuleSourceConfig, browser_auth: dict[str, Any] | None = None) -> dict[str, str]:
         cookies: dict[str, str] = {}
         cookies.update({str(k): str(v) for k, v in _parse_json_mapping(self.settings.dingtalk_default_cookies_json, label="DINGTALK_DEFAULT_COOKIES_JSON").items()})
         static_cookies = config.get_extra("static_cookies", {})
@@ -390,7 +582,24 @@ class DingtalkPayloadFetcher:
                 cookies.update({str(k): str(v) for k, v in _parse_json_mapping(cookies_env_value, label="cookies_env").items()})
             else:
                 cookies.update(_parse_cookie_string(cookies_env_value))
+        if isinstance(browser_auth, dict):
+            cookies.update({str(k): str(v) for k, v in (browser_auth.get("cookies") or {}).items()})
         return cookies
+
+    def _resolve_browser_auth(self, *, config: ModuleSourceConfig, endpoint: str) -> dict[str, Any] | None:
+        if not self.settings.dingtalk_browser_auth_enabled:
+            return {"auth_source": "disabled", "cookies": {}, "headers": {}, "matched_hosts": []}
+        target_url = endpoint if endpoint.startswith("http://") or endpoint.startswith("https://") else config.source_url
+        try:
+            return resolve_dingtalk_browser_auth(source_url=target_url)
+        except DingtalkBrowserAuthError as exc:
+            return {
+                "auth_source": "static_config_fallback",
+                "cookies": {},
+                "headers": {},
+                "matched_hosts": [],
+                "error": str(exc),
+            }
 
     @staticmethod
     def _use_parallelv2_binary_mode(config: ModuleSourceConfig) -> bool:
@@ -417,13 +626,18 @@ class DingtalkPayloadFetcher:
         return int(value)
 
     @staticmethod
-    def _extract_parallelv2_version(config: ModuleSourceConfig, payload: dict[str, Any]) -> int | None:
+    def _extract_parallelv2_version(
+        config: ModuleSourceConfig,
+        payload: dict[str, Any],
+        *,
+        allow_query_fallback: bool = True,
+    ) -> int | None:
         path = str(config.get_extra("parallelv2_version_path", "data.documentContent.checkpoint.baseVersion"))
         try:
             value = _extract_path(payload, path)
         except PayloadParseError:
             value = None
-        if value is None:
+        if value is None and allow_query_fallback:
             params = config.get_extra("parallelv2_query_params", {})
             fallback = params.get("version") if isinstance(params, dict) else None
             value = fallback

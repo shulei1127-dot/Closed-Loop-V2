@@ -51,7 +51,9 @@ ERROR_COPY = {
     "postcheck_unavailable": "缺少闭环校验能力，当前状态待确认。",
     "stage_refresh_failed": "执行后状态刷新失败，当前真实闭环状态待确认。",
     "upload_failed": "巡检报告上传失败，未能完成自动闭环。",
+    "attachment_bind_failed": "巡检报告未成功绑定到工单附件，自动闭环已中止。",
     "complete_failed": "工单阶段推进失败，未能完成自动闭环。",
+    "already_closed_before_execution": "工单已在审核/完成阶段，本次未执行新的上传闭环。",
     "manual_required": "需要人工介入处理。",
     "unknown_error": "发生未知异常，需要进一步排查。",
 }

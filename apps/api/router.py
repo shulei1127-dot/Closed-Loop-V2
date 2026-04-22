@@ -1,10 +1,11 @@
 from fastapi import APIRouter
 
-from apps.api.routers import health, modules, ops, records, snapshots, sync, task_runs, tasks
+from apps.api.routers import extension, health, modules, ops, records, snapshots, sync, task_runs, tasks
 
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
+api_router.include_router(extension.router, tags=["extension"])
 api_router.include_router(sync.router, prefix="/api", tags=["sync"])
 api_router.include_router(snapshots.router, prefix="/api", tags=["snapshots"])
 api_router.include_router(records.router, prefix="/api", tags=["records"])

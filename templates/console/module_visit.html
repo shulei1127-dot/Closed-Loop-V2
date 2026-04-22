@@ -1,6 +1,7 @@
 {% extends "console/base.html" %}
 
 {% block content %}
+<div id="module-view-meta" data-module-code="visit" data-visit-owner="{{ selected_visit_owner }}"></div>
 <section class="section">
   <div class="panel module-page-hero">
     <div>
@@ -20,12 +21,9 @@
           />
           <datalist id="visit-owner-options">
             <option value="全部"></option>
-            {% for owner in available_visit_owners %}
-            <option value="{{ owner }}"></option>
-            {% endfor %}
           </datalist>
         </div>
-        <p class="visit-owner-helper">先输入回访人，再点击“立即同步”或“重跑同步”。</p>
+        <p class="visit-owner-helper">先输入回访人，再点击“立即同步”或“重跑同步”。模块数据将后台异步加载。</p>
       </div>
     </div>
     <div class="inline-actions">
@@ -52,18 +50,36 @@
 <section class="section">
   <div class="panel">
     <div class="section-head">
-      <h4>模块状态</h4>
-      <span class="badge status-{{ module_summary.latest_sync_status or 'unknown' }}">{{ module_summary.latest_sync_status_label or '未同步' }}</span>
+      <h4>模块健康检查</h4>
+      <span id="visit-health-badge" class="badge status-unknown">加载中</span>
     </div>
-    <dl class="stats">
-      <div><dt>最近同步</dt><dd>{{ module_summary.latest_snapshot_time | fmt_dt }}</dd></div>
-      <div><dt>最近执行</dt><dd>{{ module_summary.latest_execute_status_label or '暂无' }}</dd></div>
-      <div><dt>待执行（当前筛选）</dt><dd>{{ pending_visit_filtered_count }}</dd></div>
-      <div><dt>待执行（全量）</dt><dd>{{ pending_visit_total_count }}</dd></div>
-      <div><dt>记录数</dt><dd>{{ module_summary.row_count }}</dd></div>
-      <div><dt>失败任务</dt><dd>{{ module_summary.failed_task_count }}</dd></div>
-      <div><dt>需人工处理</dt><dd>{{ module_summary.manual_required_count }}</dd></div>
+    <p id="visit-health-summary" class="muted">正在检查本模块健康状态...</p>
+    <ul id="visit-health-list" class="health-check-list">
+      <li class="muted">加载中...</li>
+    </ul>
+    <p id="visit-health-error" class="muted" hidden></p>
+    <button id="visit-health-retry" class="action-button secondary" type="button" hidden>重试健康检查</button>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <h4>模块状态</h4>
+      <span id="visit-summary-sync-badge" class="badge status-unknown">加载中</span>
+    </div>
+    <p id="visit-summary-meta" class="muted">数据时间：加载中...</p>
+    <dl class="stats" id="visit-summary-stats">
+      <div><dt>最近同步</dt><dd>加载中</dd></div>
+      <div><dt>最近执行</dt><dd>加载中</dd></div>
+      <div><dt>待执行（当前筛选）</dt><dd>加载中</dd></div>
+      <div><dt>待执行（全量）</dt><dd>加载中</dd></div>
+      <div><dt>记录数</dt><dd>加载中</dd></div>
+      <div><dt>失败任务</dt><dd>加载中</dd></div>
+      <div><dt>需人工处理</dt><dd>加载中</dd></div>
     </dl>
+    <p id="visit-summary-error" class="muted" hidden></p>
+    <button id="visit-summary-retry" class="action-button secondary" type="button" hidden>重试加载模块状态</button>
   </div>
 </section>
 
@@ -75,17 +91,19 @@
         <p class="muted">按所选回访人展示待执行任务；点击后任务会进入后台队列异步执行，页面会自动轮询执行进度。</p>
       </div>
       <button
+        id="visit-execute-all-btn"
         class="action-button danger"
         data-action="execute-all-visit"
-        data-total-count="{{ pending_visit_executable_count }}"
+        data-total-count="0"
         data-visit-owner="{{ selected_visit_owner }}"
-        {% if not pending_visit_executable_count %}disabled{% endif %}
+        disabled
       >
-        一键创建并闭环全部（后台执行 {{ pending_visit_executable_count }}）
+        一键创建并闭环全部（后台执行 0）
       </button>
     </div>
-    {% if pending_visit_items %}
-    <table class="data-table compact-table">
+    <p id="visit-pending-meta" class="muted">数据时间：加载中...</p>
+    <div id="visit-pending-section">
+    <table class="data-table compact-table" id="visit-pending-table">
       <thead>
         <tr>
           <th>客户名称</th>
@@ -98,31 +116,19 @@
           <th>操作</th>
         </tr>
       </thead>
-      <tbody>
-        {% for item in pending_visit_items %}
-        <tr>
-          <td>{{ item.customer_name or '未知客户' }}</td>
-          <td>{{ item.visit_owner or '未识别' }}</td>
-          <td>{{ item.visit_type or item.task_type }}</td>
-          <td>{{ item.delivery_id or '缺失' }}</td>
-          <td><span class="badge status-{{ item.state_tone or 'unknown' }}">{{ item.state_label or '待处理' }}</span></td>
-          <td>{{ item.latest_run_time | fmt_dt if item.latest_run_time else '未执行' }}</td>
-          <td>{{ item.business_explanation }}</td>
-          <td>
-            <a href="{{ item.detail_url }}">查看任务</a>
-            {% if item.can_execute %}
-            <button class="action-button danger" data-action="execute" data-module-code="visit" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">一键创建并闭环</button>
-            {% else %}
-            <span class="muted">补齐字段后可执行</span>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
+      <tbody id="visit-pending-tbody">
+        <tr><td colspan="8" class="muted">加载中...</td></tr>
       </tbody>
     </table>
-    {% else %}
-    <p class="muted">当前没有待执行回访任务。</p>
-    {% endif %}
+    <p id="visit-pending-empty" class="muted" hidden>当前没有待执行回访任务。</p>
+    <p id="visit-pending-error" class="muted" hidden></p>
+    <button id="visit-pending-retry" class="action-button secondary" type="button" hidden>重试加载待执行任务</button>
+    <div id="visit-pending-pagination" class="table-pagination" hidden>
+      <button id="visit-pending-prev" class="action-button secondary" type="button">上一页</button>
+      <span id="visit-pending-page-info" class="muted">第 1 页 / 共 1 页</span>
+      <button id="visit-pending-next" class="action-button secondary" type="button">下一页</button>
+    </div>
+    </div>
   </div>
 </section>
 
@@ -135,8 +141,9 @@
       </div>
       <a class="module-entry-link" href="/console/visit-links">查看全部闭环回访链接</a>
     </div>
-    {% if recent_visit_links %}
-    <table class="data-table compact-table">
+    <p id="visit-recent-meta" class="muted">数据时间：加载中...</p>
+    <div id="visit-recent-section">
+    <table class="data-table compact-table" id="visit-recent-table">
       <thead>
         <tr>
           <th>客户名称</th>
@@ -145,20 +152,19 @@
           <th>回访链接</th>
         </tr>
       </thead>
-      <tbody>
-        {% for item in recent_visit_links %}
-        <tr>
-          <td>{{ item.customer_name or '未知客户' }}</td>
-          <td>{{ item.visit_type or '未知类型' }}</td>
-          <td>{{ item.occurred_at | fmt_dt }}</td>
-          <td><a href="{{ item.final_link }}" target="_blank" rel="noreferrer">{{ item.final_link }}</a></td>
-        </tr>
-        {% endfor %}
+      <tbody id="visit-recent-tbody">
+        <tr><td colspan="4" class="muted">加载中...</td></tr>
       </tbody>
     </table>
-    {% else %}
-    <p class="muted">当前还没有成功闭环的回访链接。</p>
-    {% endif %}
+    <p id="visit-recent-empty" class="muted" hidden>当前还没有成功闭环的回访链接。</p>
+    <p id="visit-recent-error" class="muted" hidden></p>
+    <button id="visit-recent-retry" class="action-button secondary" type="button" hidden>重试加载最近闭环</button>
+    <div id="visit-recent-pagination" class="table-pagination" hidden>
+      <button id="visit-recent-prev" class="action-button secondary" type="button">上一页</button>
+      <span id="visit-recent-page-info" class="muted">第 1 页 / 共 1 页</span>
+      <button id="visit-recent-next" class="action-button secondary" type="button">下一页</button>
+    </div>
+    </div>
   </div>
 </section>
 {% endblock %}

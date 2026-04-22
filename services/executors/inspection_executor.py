@@ -309,6 +309,68 @@ class InspectionExecutor:
             ),
         )
 
+    def _build_preview_summary(
+        self,
+        context: ExecutorContext,
+        *,
+        match_result=None,
+        runner_diagnostics: dict[str, Any] | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = context.normalized_data or {}
+        missing_fields = self._missing_required_fields(normalized)
+        diagnostics = runner_diagnostics or {}
+
+        code = "actionable"
+        label = "可自动闭环"
+        reason = "已满足执行前提，可进入上传报告并闭环。"
+        next_action = "点击“上传报告并闭环”执行真实动作链。"
+
+        if missing_fields:
+            code = "context_incomplete"
+            label = "上下文不完整"
+            reason = f"缺少关键字段：{', '.join(missing_fields)}"
+            next_action = "先补齐识别字段，再执行。"
+        elif normalized.get("inspection_done") is not True:
+            code = "no_action"
+            label = "无需处理（巡检未完成）"
+            reason = "钉钉文档显示巡检是否完成=否。"
+            next_action = "无需执行，等待后续巡检完成。"
+        elif normalized.get("work_order_closed") is True:
+            code = "reviewed_no_action"
+            label = "已审核工单（无需处理）"
+            reason = "当前记录已标记为审核/闭环，无需再次上传和完成处理。"
+            next_action = "无需执行，可仅做复核。"
+        elif normalized.get("executor_name") != "舒磊":
+            code = "non_target_executor"
+            label = "非当前执行人"
+            reason = f"当前执行人是 {normalized.get('executor_name') or '未识别'}，不属于当前自动闭环范围。"
+            next_action = "切换到对应执行人，或人工处理。"
+        elif match_result is not None and match_result.manual_required:
+            if "word" in list(getattr(match_result, "missing_file_types", []) or []):
+                code = "missing_report"
+                label = "缺少报告"
+                reason = match_result.error_message or "本地未匹配到真实 Word 巡检报告。"
+                next_action = "补齐本地 Word 报告后再执行。"
+            else:
+                code = "manual_required"
+                label = "需人工处理"
+                reason = match_result.error_message or "报告匹配存在冲突，无法自动执行。"
+                next_action = "先人工处理报告匹配问题。"
+        elif diagnostics.get("config_valid") is False:
+            code = "execution_not_ready"
+            label = "执行环境未就绪"
+            reason = error_message or diagnostics.get("last_error") or "真实执行配置尚未就绪。"
+            next_action = "先修复执行环境或认证会话，再执行。"
+
+        return {
+            "business_state_code": code,
+            "business_state_label": label,
+            "ready": code == "actionable",
+            "reason": reason,
+            "next_action": next_action,
+        }
+
     def _build_payload(
         self,
         context: ExecutorContext,
@@ -323,6 +385,12 @@ class InspectionExecutor:
     ) -> dict[str, Any]:
         diagnostics = runner_diagnostics or {}
         postcheck = diagnostics.get("postcheck") or {}
+        preview = self._build_preview_summary(
+            context,
+            match_result=match_result,
+            runner_diagnostics=diagnostics,
+            error_message=(extra_payload or {}).get("reason") if extra_payload else None,
+        )
         payload = {
             "execution_mode": execution_mode,
             "customer_name": context.normalized_data.get("customer_name"),
@@ -335,6 +403,7 @@ class InspectionExecutor:
             "real_execution_enabled": self.settings.enable_real_execution,
             "inspection_real_execution_enabled": self.settings.inspection_real_execution_enabled,
             "runner_diagnostics": diagnostics,
+            "preview": preview,
             "postcheck_passed": postcheck.get("postcheck_passed", False),
             "closure_confirmed": postcheck.get("closure_confirmed", False),
             "report_attached_confirmed": postcheck.get("report_attached_confirmed", False),
@@ -343,6 +412,7 @@ class InspectionExecutor:
             "postcheck_uploaded_file_ids_found": postcheck.get("postcheck_uploaded_file_ids_found", []),
             "postcheck_uploaded_filenames_expected": postcheck.get("postcheck_uploaded_filenames_expected", []),
             "postcheck_uploaded_filenames_found": postcheck.get("postcheck_uploaded_filenames_found", []),
+            "postcheck_attachment_match_mode": postcheck.get("postcheck_attachment_match_mode", "none"),
         }
         if extra_payload:
             payload.update(extra_payload)

@@ -48,11 +48,19 @@ class OpsEventItem(BaseModel):
 class OpsOverviewResponse(BaseModel):
     ok: bool = True
     items: list[OpsOverviewItem] = Field(default_factory=list)
+    meta: "OpsDataMeta | None" = None
+
+
+class OpsModuleSummaryResponse(BaseModel):
+    ok: bool = True
+    item: OpsOverviewItem | None = None
+    meta: "OpsDataMeta | None" = None
 
 
 class OpsEventListResponse(BaseModel):
     ok: bool = True
     items: list[OpsEventItem] = Field(default_factory=list)
+    meta: "OpsDataMeta | None" = None
 
 
 class PendingTaskItem(BaseModel):
@@ -73,6 +81,13 @@ class PendingTaskItem(BaseModel):
     latest_run_status_label: str | None = None
     latest_run_time: datetime | None = None
     business_explanation: str | None = None
+    business_state_code: str | None = None
+    business_state_label: str | None = None
+    business_state_tone: str | None = None
+    technical_state_code: str | None = None
+    technical_state_label: str | None = None
+    technical_state_tone: str | None = None
+    technical_detail: str | None = None
     state_code: str | None = None
     state_label: str | None = None
     state_tone: str | None = None
@@ -98,6 +113,35 @@ class RecentInspectionClosureItem(BaseModel):
     detail_url: str | None = None
     task_plan_id: str | None = None
     task_run_id: str | None = None
+
+
+class PendingTaskListResponse(BaseModel):
+    ok: bool = True
+    items: list[PendingTaskItem] = Field(default_factory=list)
+    meta: "OpsDataMeta | None" = None
+
+
+class RecentVisitLinkListResponse(BaseModel):
+    ok: bool = True
+    items: list[RecentVisitLinkItem] = Field(default_factory=list)
+    meta: "OpsDataMeta | None" = None
+
+
+class RecentInspectionClosureListResponse(BaseModel):
+    ok: bool = True
+    items: list[RecentInspectionClosureItem] = Field(default_factory=list)
+    meta: "OpsDataMeta | None" = None
+
+
+class StringListResponse(BaseModel):
+    ok: bool = True
+    items: list[str] = Field(default_factory=list)
+    meta: "OpsDataMeta | None" = None
+
+
+class OpsDataMeta(BaseModel):
+    cached: bool = False
+    served_at: datetime
 
 
 class PtsSessionStatusResponse(BaseModel):

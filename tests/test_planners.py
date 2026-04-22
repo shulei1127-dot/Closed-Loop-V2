@@ -104,7 +104,7 @@ def test_inspection_planner_skips_records_already_in_review_stage() -> None:
     assert result[0].planned_payload["work_order_stage"] == "审核工单"
 
 
-def test_proactive_planner_requires_liaison_and_empty_visit_link() -> None:
+def test_proactive_planner_requires_owner_feedback_and_empty_visit_link() -> None:
     planner = ProactivePlanner()
     result = planner.plan(
         [
@@ -114,6 +114,8 @@ def test_proactive_planner_requires_liaison_and_empty_visit_link() -> None:
                 "normalized_data": {
                     "customer_name": "北京客户",
                     "liaison_status": "已建联",
+                    "visit_owner": "郑康乐",
+                    "feedback_note": "来自钉钉文档备注",
                     "visit_link": None,
                 },
             },
@@ -123,13 +125,17 @@ def test_proactive_planner_requires_liaison_and_empty_visit_link() -> None:
                 "normalized_data": {
                     "customer_name": "深圳客户",
                     "liaison_status": "已建联",
-                    "visit_link": "x",
+                    "visit_owner": "舒磊",
+                    "feedback_note": "",
+                    "visit_link": None,
                 },
             },
         ]
     )
     assert result[0].task_type == "proactive_visit_close"
     assert result[0].eligibility is True
+    assert result[0].planned_payload["visit_owner"] == "郑康乐"
+    assert result[0].planned_payload["visit_type"] == "客户满意度调研"
     assert result[1].eligibility is False
     assert result[1].plan_status == "skipped"
-    assert result[1].skip_reason == "不满足 customer_name 存在、liaison_status=已建联、且 visit_link 为空"
+    assert result[1].skip_reason == "不满足 customer_name 存在、liaison_status=已建联、visit_owner 存在、feedback_note 非空、且 visit_link 为空"

@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     dingtalk_default_headers_json: str = "{}"
     dingtalk_default_cookies_json: str = "{}"
     dingtalk_auth_token: str = ""
+    dingtalk_browser_auth_enabled: bool = True
     dingtalk_request_timeout_seconds: float = 15.0
     dingtalk_verify_ssl: bool = True
     pts_base_url: str = "https://pts.chaitin.net"
@@ -48,6 +49,16 @@ class Settings(BaseSettings):
     inspection_real_final_link_path: str = "data.final_link"
     inspection_real_timeout_seconds: float = 15.0
     inspection_real_verify_ssl: bool = True
+    inspection_upload_via_frontend_enabled: bool = True
+    inspection_add_work_order_info_enabled: bool = True
+    inspection_sync_stage_correction_enabled: bool = False
+    inspection_deadline_reminder_enabled: bool = False
+    inspection_deadline_reminder_cron: str = "0 9 * * *"
+    inspection_deadline_reminder_query_limit: int = 500
+    inspection_deadline_reminder_dingtalk_webhook: str = ""
+    inspection_deadline_reminder_dingtalk_secret: str = ""
+    inspection_deadline_reminder_dingtalk_timeout_seconds: float = 10.0
+    inspection_deadline_reminder_query_payload_json: str = ""
     proactive_real_execution_enabled: bool = False
     proactive_real_base_url: str = ""
     proactive_real_token: str = ""
@@ -61,6 +72,8 @@ class Settings(BaseSettings):
     inspection_report_root: str = "/Users/shulei/Downloads/巡检报告集合-已审核"
     sync_retry_max_attempts: int = 2
     execute_retry_max_attempts: int = 2
+    task_plan_latest_by_sql_enabled: bool = True
+    ops_read_cache_ttl_seconds: float = 3.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -6,6 +6,7 @@ import tempfile
 import time
 from typing import Any, Awaitable, Callable
 from pathlib import Path
+from urllib.parse import urlparse
 
 from core.config import Settings, get_settings
 from services.executors.visit_real_runner import _PtsBrowserSession, _PtsRunnerError
@@ -40,6 +41,7 @@ _STAGE_MARKERS = (
 )
 _WHITESPACE_RE = re.compile(r"\s+")
 _CURRENT_STAGE_RE = re.compile(r"工单当前阶段[:：]\s*([^\s]+)")
+_WAITING_CHECK_RE = re.compile(r"等待\s*[^\s]{1,32}\s*审核工单")
 _STAGE_ALIASES = {
     "审核工单": "审核工单",
     "完成": "审核工单",
@@ -88,7 +90,27 @@ class InspectionWorkOrderStageBackfill:
                 seen_links.add(work_order_link)
                 links_to_prefetch.append(work_order_link)
             if links_to_prefetch:
-                self._stage_cache.update(await self._read_stages_from_local_chrome_profile_batch(links_to_prefetch))
+                structured_prefetch: dict[str, tuple[str | None, str, str | None]] = {}
+                fallback_links: list[str] = []
+                for work_order_link in links_to_prefetch:
+                    try:
+                        structured_prefetch[work_order_link] = await self._read_stage_from_pts_structured(work_order_link)
+                    except Exception:
+                        structured_prefetch[work_order_link] = (None, "stage_lookup_error", None)
+                    stage, source, _ = structured_prefetch[work_order_link]
+                    if stage:
+                        continue
+                    if source in {
+                        "not_found",
+                        "work_order_id_missing",
+                        "stage_lookup_error",
+                        "open_failed",
+                        "browser_session_unavailable",
+                    }:
+                        fallback_links.append(work_order_link)
+                self._stage_cache.update(structured_prefetch)
+                if fallback_links:
+                    self._stage_cache.update(await self._read_stages_from_local_chrome_profile_batch(fallback_links))
 
         for item in normalized_records:
             data = item.get("normalized_data", {})
@@ -111,7 +133,13 @@ class InspectionWorkOrderStageBackfill:
                 except Exception:
                     cached = (None, "stage_lookup_error", None)
                 self._stage_cache[work_order_link] = cached
-            elif self._use_default_stage_reader and cached[1] in {"browser_session_unavailable", "stage_lookup_error"}:
+            elif self._use_default_stage_reader and cached[1] in {
+                "browser_session_unavailable",
+                "stage_lookup_error",
+                "session_expired",
+                "not_found",
+                "open_failed",
+            }:
                 try:
                     cached = await self._read_stage_from_pts_browser_session_only(work_order_link)
                 except Exception:
@@ -139,8 +167,9 @@ class InspectionWorkOrderStageBackfill:
                 "browser_session_unavailable",
                 "open_failed",
             }:
-                data["work_order_closed"] = False
-                data["debug_work_order_closed_normalized"] = False
+                # Stage unknown: avoid forcing open state.
+                data["work_order_closed"] = None
+                data["debug_work_order_closed_normalized"] = None
         return normalized_records
 
     @staticmethod
@@ -156,10 +185,70 @@ class InspectionWorkOrderStageBackfill:
         )
 
     async def _read_stage_from_pts(self, work_order_link: str) -> tuple[str | None, str, str | None]:
+        structured_stage, structured_source, structured_raw = await self._read_stage_from_pts_structured(work_order_link)
+        if structured_stage:
+            return structured_stage, structured_source, structured_raw
+
         stage, source, raw_value = await self._read_stage_from_local_chrome_profile(work_order_link)
-        if stage or source != "browser_session_unavailable":
+        # Local profile probing is fast but can be stale/session-expired.
+        # Fall back to live browser session for uncertain results.
+        if stage:
             return stage, source, raw_value
-        return await self._read_stage_from_pts_browser_session_only(work_order_link)
+        if source in {"browser_session_unavailable", "session_expired", "stage_lookup_error", "not_found"}:
+            fallback_stage, fallback_source, fallback_raw = await self._read_stage_from_pts_browser_session_only(
+                work_order_link
+            )
+            if fallback_stage:
+                return fallback_stage, fallback_source, fallback_raw
+            # Keep stronger fallback source when available so caller can distinguish uncertainty.
+            if fallback_source and fallback_source != "not_found":
+                return fallback_stage, fallback_source, fallback_raw
+        if structured_source not in {"", "not_found", "stage_lookup_error"}:
+            return None, structured_source, structured_raw
+        return stage, source, raw_value
+
+    async def _read_stage_from_pts_structured(self, work_order_link: str) -> tuple[str | None, str, str | None]:
+        work_order_id = self._extract_work_order_id(work_order_link)
+        if not work_order_id:
+            return None, "work_order_id_missing", None
+        try:
+            async with _PtsBrowserSession(self.settings) as session:
+                open_result = await session.open_project(work_order_link)
+                if open_result.get("status") != "success":
+                    return (
+                        None,
+                        str(open_result.get("error_type") or "open_failed"),
+                        str(open_result.get("error_message") or ""),
+                    )
+                payload = await session.graphql_payload(
+                    {
+                        "operationName": "WorkOrderStageByID",
+                        "variables": {"id": work_order_id},
+                        "query": (
+                            "query WorkOrderStageByID($id: ID!) { "
+                            "workOrderByID(id: $id) { "
+                            "is_finished "
+                            "current_stage { name } "
+                            "} "
+                            "}"
+                        ),
+                    }
+                )
+        except _PtsRunnerError as exc:
+            return None, exc.error_type, exc.error_message
+        except Exception:
+            return None, "stage_lookup_error", None
+
+        work_order = (payload or {}).get("workOrderByID") or {}
+        is_finished = bool(work_order.get("is_finished"))
+        stage_name = str(((work_order.get("current_stage") or {}).get("name") or "")).strip()
+        raw_marker = f"workOrderByID.current_stage={stage_name}" if stage_name else None
+        if is_finished:
+            return "审核工单", "pts_browser_structured", raw_marker or "workOrderByID.is_finished=true"
+        normalized_stage = _STAGE_ALIASES.get(stage_name)
+        if normalized_stage:
+            return normalized_stage, "pts_browser_structured", raw_marker
+        return None, "not_found", raw_marker
 
     async def _read_stage_from_pts_browser_session_only(self, work_order_link: str) -> tuple[str | None, str, str | None]:
         try:
@@ -289,11 +378,23 @@ class InspectionWorkOrderStageBackfill:
         data.setdefault("debug_work_order_stage_raw", None)
         data.setdefault("debug_work_order_stage_normalized", data.get("work_order_stage"))
 
+    @staticmethod
+    def _extract_work_order_id(work_order_link: str) -> str | None:
+        try:
+            parsed = urlparse(str(work_order_link))
+        except Exception:
+            return None
+        tail = parsed.path.rstrip("/").split("/")[-1]
+        return tail or None
+
 
 def extract_inspection_stage_from_text(text: str | None) -> tuple[str | None, str | None]:
     if not isinstance(text, str) or not text.strip():
         return None, None
     normalized_text = _WHITESPACE_RE.sub(" ", text)
+    waiting_check_match = _WAITING_CHECK_RE.search(normalized_text)
+    if waiting_check_match:
+        return "审核工单", waiting_check_match.group(0)
     for stage, marker in _CLOSED_MARKERS:
         if marker in normalized_text:
             return stage, marker

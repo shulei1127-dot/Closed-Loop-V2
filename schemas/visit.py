@@ -22,3 +22,5 @@ class VisitNormalizedRecord(BaseModel):
     visit_contact: str | None = None
     satisfaction: str | None = None
     feedback_note: str | None = None
+    due_date_primary: str | None = None
+    due_date_secondary: str | None = None

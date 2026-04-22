@@ -98,6 +98,26 @@ def test_visit_recognizer_maps_pts_selected_satisfaction() -> None:
     assert normalized["feedback_note"] == "来自钉钉文档"
 
 
+def test_visit_recognizer_treats_non_empty_link_text_as_filled() -> None:
+    recognizer = VisitRecognizer()
+    raw_columns = ["客户名称", "回访人", "回访状态", "回访链接"]
+    raw_rows = [
+        {
+            "row_id": "visit-link-text-001",
+            "客户名称": "北京立达信安科技有限公司",
+            "回访人": "舒磊",
+            "回访状态": "已回访",
+            "回访链接": '{"url":"已创建工单并闭环","text":"已创建工单并闭环"}',
+        }
+    ]
+
+    result = recognizer.recognize(raw_columns, raw_rows)
+    normalized = result.normalized_records[0]["normalized_data"]
+
+    assert normalized["visit_link"] == "已创建工单并闭环"
+
+
+
 def test_inspection_real_rows_field_recognition() -> None:
     recognizer = InspectionRecognizer()
     raw_columns = ["启动月份", "企业名称", "增值服务类型1", "执行人", "任务链接", "工单号", "完成状态", "工单是否闭环", "报告名称", "备注"]
@@ -175,7 +195,7 @@ def test_inspection_work_order_backfill_marks_review_stage_closed() -> None:
 
 def test_proactive_real_rows_field_recognition() -> None:
     recognizer = ProactiveRecognizer()
-    raw_columns = ["公司名称", "产品页面", "信息ID", "建联状态", "闭环链接", "客户反馈", "联络人", "手机号", "负责人"]
+    raw_columns = ["公司名称", "产品页面", "信息ID", "建联状态", "回访人", "闭环链接", "备注（异常详情+其他备注）", "联络人", "手机号", "工程师"]
     raw_rows = [
         {
             "row_id": "proactive-alias-001",
@@ -183,11 +203,12 @@ def test_proactive_real_rows_field_recognition() -> None:
             "产品页面": "https://product.example.com/alias-001",
             "信息ID": "PI-ALIAS-001",
             "建联状态": "已联系",
+            "回访人": "郑康乐",
             "闭环链接": "",
-            "客户反馈": "主动回访别名测试",
+            "备注（异常详情+其他备注）": "主动回访别名测试",
             "联络人": "赵总",
             "手机号": "13800000000",
-            "负责人": "工程师A",
+            "工程师": "工程师A",
         }
     ]
 
@@ -195,9 +216,57 @@ def test_proactive_real_rows_field_recognition() -> None:
 
     assert result.field_mapping["customer_name"] == "公司名称"
     assert result.field_mapping["liaison_status"] == "建联状态"
+    assert result.field_mapping["visit_owner"] == "回访人"
+    assert result.field_mapping["feedback_note"] == "备注（异常详情+其他备注）"
     assert result.normalized_records[0]["normalized_data"]["liaison_status"] == "已建联"
+    assert result.normalized_records[0]["normalized_data"]["visit_owner"] == "郑康乐"
+    assert result.normalized_records[0]["normalized_data"]["feedback_note"] == "主动回访别名测试"
     assert result.normalized_records[0]["normalized_data"]["contact_phone"] == "13800000000"
     assert result.recognition_status == "full"
+
+
+def test_proactive_recognizer_normalizes_dingtalk_nick_mentions() -> None:
+    recognizer = ProactiveRecognizer()
+    raw_columns = ["客户名称", "客户建联状态", "回访人", "回访链接", "备注（异常详情+其他备注）"]
+    raw_rows = [
+        {
+            "row_id": "proactive-mention-001",
+            "客户名称": "测试客户",
+            "客户建联状态": "已建联",
+            "回访人": (
+                '[{"identifier":"1389939331","sequence":"龙静玥","filterFactor":"1389939331",'
+                '"data":"{\\"name\\":null,\\"nick\\":\\"龙静玥\\",\\"uid\\":\\"1389939331\\"}"}]'
+            ),
+            "回访链接": "",
+            "备注（异常详情+其他备注）": "钉钉 mention 字段包装变化",
+        }
+    ]
+
+    result = recognizer.recognize(raw_columns, raw_rows)
+    normalized = result.normalized_records[0]["normalized_data"]
+
+    assert normalized["visit_owner"] == "龙静玥"
+    assert result.recognition_status == "full"
+
+
+def test_proactive_recognizer_treats_non_empty_link_text_as_filled() -> None:
+    recognizer = ProactiveRecognizer()
+    raw_columns = ["客户名称", "客户建联状态", "回访人", "回访链接", "备注（异常详情+其他备注）"]
+    raw_rows = [
+        {
+            "row_id": "proactive-link-text-001",
+            "客户名称": "测试客户",
+            "客户建联状态": "已建联",
+            "回访人": "舒磊",
+            "回访链接": '{"url":"已创建工单并闭环","text":"已创建工单并闭环"}',
+            "备注（异常详情+其他备注）": "已记录备注",
+        }
+    ]
+
+    result = recognizer.recognize(raw_columns, raw_rows)
+    normalized = result.normalized_records[0]["normalized_data"]
+
+    assert normalized["visit_link"] == "已创建工单并闭环"
 
 
 def test_recognition_status_full_partial_failed() -> None:

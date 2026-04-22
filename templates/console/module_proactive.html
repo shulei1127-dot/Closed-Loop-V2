@@ -1,12 +1,30 @@
 {% extends "console/base.html" %}
 
 {% block content %}
+<div id="module-view-meta" data-module-code="proactive" data-visit-owner="{{ selected_visit_owner }}"></div>
 <section class="section">
   <div class="panel module-page-hero">
     <div>
       <p class="eyebrow">Proactive Module</p>
       <h3>超半年主动回访</h3>
-      <p class="muted">这里集中看主动回访模块当前需要处理的任务，不再和其他模块混在总览里。</p>
+      <p class="muted">这里只展示客户建联状态为已建联、回访链接为空，且备注（异常详情+其他备注）不为空的主动回访任务。</p>
+      <div class="visit-owner-filter">
+        <label for="proactive-owner-filter">回访人筛选</label>
+        <div class="visit-owner-filter-main">
+          <input
+            id="proactive-owner-filter"
+            class="visit-owner-input"
+            list="proactive-owner-options"
+            type="text"
+            placeholder="输入回访人姓名，留空或输入“全部”表示不过滤"
+            value="{{ selected_visit_owner }}"
+          />
+          <datalist id="proactive-owner-options">
+            <option value="全部"></option>
+          </datalist>
+        </div>
+        <p class="visit-owner-helper">先输入回访人，再点击“立即同步”或“重跑同步”。执行时只创建客户满意度调研类型工单。</p>
+      </div>
     </div>
     <div class="inline-actions">
       <button
@@ -32,17 +50,36 @@
 <section class="section">
   <div class="panel">
     <div class="section-head">
-      <h4>模块状态</h4>
-      <span class="badge status-{{ module_summary.latest_sync_status or 'unknown' }}">{{ module_summary.latest_sync_status_label or '未同步' }}</span>
+      <h4>模块健康检查</h4>
+      <span id="proactive-health-badge" class="badge status-unknown">加载中</span>
     </div>
-    <dl class="stats">
-      <div><dt>最近同步</dt><dd>{{ module_summary.latest_snapshot_time | fmt_dt }}</dd></div>
-      <div><dt>最近执行</dt><dd>{{ module_summary.latest_execute_status_label or '暂无' }}</dd></div>
-      <div><dt>待执行</dt><dd>{{ module_summary.planned_tasks }}</dd></div>
-      <div><dt>记录数</dt><dd>{{ module_summary.row_count }}</dd></div>
-      <div><dt>失败任务</dt><dd>{{ module_summary.failed_task_count }}</dd></div>
-      <div><dt>需人工处理</dt><dd>{{ module_summary.manual_required_count }}</dd></div>
+    <p id="proactive-health-summary" class="muted">正在检查本模块健康状态...</p>
+    <ul id="proactive-health-list" class="health-check-list">
+      <li class="muted">加载中...</li>
+    </ul>
+    <p id="proactive-health-error" class="muted" hidden></p>
+    <button id="proactive-health-retry" class="action-button secondary" type="button" hidden>重试健康检查</button>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <h4>模块状态</h4>
+      <span id="proactive-summary-sync-badge" class="badge status-unknown">加载中</span>
+    </div>
+    <p id="proactive-summary-meta" class="muted">数据时间：加载中...</p>
+    <dl class="stats" id="proactive-summary-stats">
+      <div><dt>最近同步</dt><dd>加载中</dd></div>
+      <div><dt>最近执行</dt><dd>加载中</dd></div>
+      <div><dt>待执行（当前筛选）</dt><dd>加载中</dd></div>
+      <div><dt>待执行（全量）</dt><dd>加载中</dd></div>
+      <div><dt>记录数</dt><dd>加载中</dd></div>
+      <div><dt>失败任务</dt><dd>加载中</dd></div>
+      <div><dt>需人工处理</dt><dd>加载中</dd></div>
     </dl>
+    <p id="proactive-summary-error" class="muted" hidden></p>
+    <button id="proactive-summary-retry" class="action-button secondary" type="button" hidden>重试加载模块状态</button>
   </div>
 </section>
 
@@ -51,40 +88,82 @@
     <div class="section-head">
       <div>
         <h4>待处理主动回访任务</h4>
-        <p class="muted">这里只展示当前仍需要处理的主动回访任务。</p>
+        <p class="muted">按所选回访人展示待处理任务，客户意见反馈会直接取自钉钉文档的备注（异常详情+其他备注）字段。</p>
       </div>
-      <a class="module-entry-link" href="/console/tasks?module_code=proactive&status=all">查看全量 planner 结果</a>
+      <div class="inline-actions">
+        <button
+          id="proactive-execute-all-btn"
+          class="action-button danger"
+          data-action="execute-all-proactive"
+          data-total-count="0"
+          data-visit-owner="{{ selected_visit_owner }}"
+          disabled
+        >
+          一键执行闭环全部（后台执行 0）
+        </button>
+        <a class="module-entry-link" href="/console/tasks?module_code=proactive&status=all">查看全量 planner 结果</a>
+      </div>
     </div>
-    {% if pending_proactive_items %}
-    <table class="data-table compact-table">
+    <p id="proactive-pending-meta" class="muted">数据时间：加载中...</p>
+    <div id="proactive-pending-section">
+    <table class="data-table compact-table" id="proactive-pending-table">
       <thead>
         <tr>
           <th>客户名称</th>
-          <th>任务类型</th>
+          <th>回访人</th>
           <th>最近执行</th>
           <th>状态说明</th>
           <th>操作</th>
         </tr>
       </thead>
-      <tbody>
-        {% for item in pending_proactive_items %}
-        <tr>
-          <td>{{ item.customer_name or '未知客户' }}</td>
-          <td>{{ item.task_type }}</td>
-          <td>{{ item.latest_run_time | fmt_dt if item.latest_run_time else '未执行' }}</td>
-          <td>{{ item.business_explanation }}</td>
-          <td>
-            <a href="{{ item.detail_url }}">查看任务</a>
-            <button class="action-button secondary" data-action="precheck" data-task-id="{{ item.task_plan_id }}">预检查</button>
-            <button class="action-button danger" data-action="execute" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">执行</button>
-          </td>
-        </tr>
-        {% endfor %}
+      <tbody id="proactive-pending-tbody">
+        <tr><td colspan="5" class="muted">加载中...</td></tr>
       </tbody>
     </table>
-    {% else %}
-    <p class="muted">当前没有待处理主动回访任务。</p>
-    {% endif %}
+    <div class="table-pagination" id="proactive-pending-pagination" hidden>
+      <button id="proactive-pending-prev" class="action-button secondary" type="button">上一页</button>
+      <span id="proactive-pending-page-info" class="muted">第 1 页 / 共 1 页</span>
+      <button id="proactive-pending-next" class="action-button secondary" type="button">下一页</button>
+    </div>
+    <p id="proactive-pending-empty" class="muted" hidden>当前没有待处理主动回访任务。</p>
+    <p id="proactive-pending-error" class="muted" hidden></p>
+    <button id="proactive-pending-retry" class="action-button secondary" type="button" hidden>重试加载待处理任务</button>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h4>最近闭环回访记录</h4>
+        <p class="muted">真实执行成功并闭环后，会在这里展示最近的回访链接。</p>
+      </div>
+    </div>
+    <p id="proactive-recent-meta" class="muted">数据时间：加载中...</p>
+    <div id="proactive-recent-section">
+      <table class="data-table compact-table" id="proactive-recent-table">
+        <thead>
+          <tr>
+            <th>客户名称</th>
+            <th>回访类型</th>
+            <th>闭环时间</th>
+            <th>回访链接</th>
+          </tr>
+        </thead>
+        <tbody id="proactive-recent-tbody">
+          <tr><td colspan="4" class="muted">加载中...</td></tr>
+        </tbody>
+      </table>
+      <div class="table-pagination" id="proactive-recent-pagination" hidden>
+        <button id="proactive-recent-prev" class="action-button secondary" type="button">上一页</button>
+        <span id="proactive-recent-page-info" class="muted">第 1 页 / 共 1 页</span>
+        <button id="proactive-recent-next" class="action-button secondary" type="button">下一页</button>
+      </div>
+      <p id="proactive-recent-empty" class="muted" hidden>当前还没有成功闭环的主动回访记录。</p>
+      <p id="proactive-recent-error" class="muted" hidden></p>
+      <button id="proactive-recent-retry" class="action-button secondary" type="button" hidden>重试加载最近闭环</button>
+    </div>
   </div>
 </section>
 {% endblock %}

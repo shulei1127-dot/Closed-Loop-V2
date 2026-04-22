@@ -7,6 +7,7 @@ class ProactiveNormalizedRecord(BaseModel):
     product_info_id: str | None = None
     liaison_status: str | None = None
     visit_link: str | None = None
+    visit_owner: str | None = None
     feedback_note: str | None = None
     contact_name: str | None = None
     contact_phone: str | None = None

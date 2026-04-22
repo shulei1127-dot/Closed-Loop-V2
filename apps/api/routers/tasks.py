@@ -77,6 +77,19 @@ def precheck_task(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/tasks/{task_id}/preview", response_model=TaskRunResponse)
+def preview_task(
+    task_id: uuid.UUID,
+    service: TaskExecutionService = Depends(get_task_execution_service),
+) -> TaskRunResponse:
+    try:
+        return TaskRunResponse(item=service.preview_task(task_id))
+    except OperationConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ResourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/tasks/{task_id}/execute", response_model=TaskRunResponse)
 async def execute_task(
     task_id: uuid.UUID,
@@ -147,7 +160,7 @@ async def enqueue_pending_tasks(
         module_code=request.module_code,
         limit=5000,
         month=request.month,
-        visit_owner=request.visit_owner if request.module_code == "visit" else None,
+        visit_owner=request.visit_owner if request.module_code in {"visit", "proactive"} else None,
     )
     if request.module_code in {"inspection", "visit"}:
         pending_items = [item for item in pending_items if item.can_execute]
@@ -186,7 +199,7 @@ async def execute_pending_tasks(
         module_code=request.module_code,
         limit=5000,
         month=request.month,
-        visit_owner=request.visit_owner if request.module_code == "visit" else None,
+        visit_owner=request.visit_owner if request.module_code in {"visit", "proactive"} else None,
     )
     if request.module_code in {"inspection", "visit"}:
         pending_items = [item for item in pending_items if item.can_execute]

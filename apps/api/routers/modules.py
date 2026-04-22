@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from core.db import get_db
 from core.exceptions import OperationConflictError, ResourceNotFoundError, UnsupportedModuleError
 from schemas.sync import SyncRerunRequest
+from services.ops_service import clear_ops_read_cache
 from services.sync_service import SyncService
 
 
@@ -42,6 +43,7 @@ async def module_sync_rerun(
     service = SyncService(db)
     try:
         response = await service.run_sync(module_code, trigger="rerun", sync_months=request.sync_months)
+        clear_ops_read_cache(module_code=module_code)
         return response.model_dump()
     except OperationConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

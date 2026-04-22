@@ -15,6 +15,7 @@ from core.exceptions import OperationConflictError
 from models.module_config import ModuleConfig
 from repositories.module_config_repo import ModuleConfigRepository
 from services.module_registry import default_module_configs
+from services.reminders.inspection_deadline_service import InspectionDeadlineReminderService
 from services.sync_service import SyncService
 
 
@@ -61,6 +62,13 @@ def register_jobs(
             },
         )
         registered_ids.append(job_id)
+    reminder_job_id = _register_inspection_deadline_reminder_job(
+        scheduler,
+        settings=settings,
+        session_factory=session_factory,
+    )
+    if reminder_job_id:
+        registered_ids.append(reminder_job_id)
     return registered_ids
 
 
@@ -79,6 +87,18 @@ def run_scheduled_sync_job(
         logger.exception("scheduler sync job failed for %s", module_code)
 
 
+def run_scheduled_inspection_deadline_reminder_job(
+    *,
+    session_factory: Callable[[], Session] | sessionmaker = SessionLocal,
+) -> None:
+    try:
+        with session_factory() as db:
+            service = InspectionDeadlineReminderService(db)
+            asyncio.run(service.run_cycle(trigger="scheduler"))
+    except Exception:
+        logger.exception("scheduler inspection deadline reminder job failed")
+
+
 def _build_trigger(module_config: ModuleConfig):
     if module_config.sync_cron:
         return CronTrigger.from_crontab(module_config.sync_cron)
@@ -88,3 +108,27 @@ def _build_trigger(module_config: ModuleConfig):
         if interval_minutes > 0:
             return IntervalTrigger(minutes=interval_minutes)
     return None
+
+
+def _register_inspection_deadline_reminder_job(
+    scheduler: BackgroundScheduler,
+    *,
+    settings,
+    session_factory: Callable[[], Session] | sessionmaker,
+) -> str | None:
+    if not settings.inspection_deadline_reminder_enabled:
+        return None
+    cron = str(settings.inspection_deadline_reminder_cron or "").strip()
+    if not cron:
+        return None
+    job_id = "reminder:inspection-deadline"
+    scheduler.add_job(
+        run_scheduled_inspection_deadline_reminder_job,
+        trigger=CronTrigger.from_crontab(cron),
+        id=job_id,
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        kwargs={"session_factory": session_factory},
+    )
+    return job_id

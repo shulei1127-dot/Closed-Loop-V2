@@ -11,6 +11,8 @@ class ProactivePlanner:
                 and item.get("recognition_status") != "failed"
                 and data.get("liaison_status") == "已建联"
                 and not data.get("visit_link")
+                and bool(str(data.get("visit_owner") or "").strip())
+                and bool(str(data.get("feedback_note") or "").strip())
             )
             task_plans.append(
                 TaskPlanDTO(
@@ -18,12 +20,19 @@ class ProactivePlanner:
                     source_row_id=item["source_row_id"],
                     task_type="proactive_visit_close",
                     eligibility=eligible,
-                    skip_reason=None if eligible else "不满足 customer_name 存在、liaison_status=已建联、且 visit_link 为空",
+                    skip_reason=(
+                        None
+                        if eligible
+                        else "不满足 customer_name 存在、liaison_status=已建联、visit_owner 存在、feedback_note 非空、且 visit_link 为空"
+                    ),
                     plan_status="planned" if eligible else "skipped",
                     planned_payload={
                         "customer_name": data.get("customer_name"),
                         "product_info_id": data.get("product_info_id"),
                         "product_link": data.get("product_link"),
+                        "visit_owner": data.get("visit_owner"),
+                        "visit_type": "客户满意度调研",
+                        "feedback_note": data.get("feedback_note"),
                     },
                 )
             )

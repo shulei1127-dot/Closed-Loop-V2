@@ -154,6 +154,40 @@ pre {
   gap: 1rem;
 }
 
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.health-card {
+  border: 1px solid rgba(217, 207, 191, 0.8);
+  border-radius: 16px;
+  padding: 0.9rem 1rem;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.health-check-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.health-check-list li {
+  line-height: 1.5;
+}
+
+.health-check-list strong {
+  color: var(--ink);
+}
+
+.technical-hint {
+  margin-top: 0.3rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
 .card,
 .panel,
 .feedback-panel {
@@ -238,6 +272,20 @@ pre {
 .stats dd {
   margin: 0.25rem 0 0;
   font-weight: 700;
+}
+
+.table-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 0.9rem;
+}
+
+.table-pagination .muted {
+  margin: 0;
+  min-width: 8rem;
+  text-align: center;
 }
 
 .badge {

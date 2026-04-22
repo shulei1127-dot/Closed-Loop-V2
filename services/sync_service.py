@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
@@ -26,6 +27,7 @@ from services.module_registry import MODULE_DEFINITIONS, default_module_configs,
 from services.planners.inspection_planner import InspectionPlanner
 from services.planners.proactive_planner import ProactivePlanner
 from services.planners.visit_planner import VisitPlanner
+from services.recognizers.inspection_local_report_backfill import InspectionLocalReportBackfill
 from services.recognizers.inspection_work_order_backfill import InspectionWorkOrderStageBackfill
 from services.recognizers.inspection_recognizer import InspectionRecognizer
 from services.recognizers.proactive_recognizer import ProactiveRecognizer
@@ -53,8 +55,10 @@ PLANNER_REGISTRY = {
 
 ENRICHER_REGISTRY = {
     "visit": VisitDeliveryIdBackfill,
-    "inspection": InspectionWorkOrderStageBackfill,
+    "inspection": InspectionLocalReportBackfill,
 }
+
+logger = logging.getLogger(__name__)
 
 
 class SyncService:
@@ -301,6 +305,17 @@ class SyncService:
             return recognition_result
         enricher = enricher_cls()
         recognition_result.normalized_records = await enricher.enrich_records(recognition_result.normalized_records)
+        if module_code == "inspection":
+            correction_enabled = bool(getattr(self.settings, "inspection_sync_stage_correction_enabled", False))
+            logger.info(
+                "inspection sync stage correction hook %s",
+                "enabled" if correction_enabled else "disabled",
+            )
+            if correction_enabled:
+                stage_enricher = InspectionWorkOrderStageBackfill(self.settings)
+                recognition_result.normalized_records = await stage_enricher.enrich_records(
+                    recognition_result.normalized_records
+                )
         return recognition_result
 
     def _build_module_summary(self, latest: SourceSnapshot, module_name: str) -> ModuleSummaryItem:

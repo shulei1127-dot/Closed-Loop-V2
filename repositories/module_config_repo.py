@@ -33,6 +33,18 @@ class ModuleConfigRepository(BaseRepository):
 
     @staticmethod
     def _patch_missing_fields(existing_item: ModuleConfig, defaults: dict) -> None:
+        if ModuleConfigRepository._is_stale_placeholder_config(existing_item, defaults):
+            existing_item.source_url = defaults["source_url"]
+            existing_item.source_doc_key = defaults["source_doc_key"]
+            existing_item.source_view_key = defaults["source_view_key"]
+            existing_item.collector_type = defaults["collector_type"]
+            existing_item.extra_config = ModuleConfigRepository._merge_extra_config(
+                defaults.get("extra_config", {}),
+                existing_item.extra_config or {},
+                drop_fixture_keys=True,
+            )
+            return
+
         if not existing_item.module_name:
             existing_item.module_name = defaults["module_name"]
         if not existing_item.source_url:
@@ -43,6 +55,37 @@ class ModuleConfigRepository(BaseRepository):
             existing_item.source_view_key = defaults["source_view_key"]
         if not getattr(existing_item, "collector_type", None):
             existing_item.collector_type = defaults["collector_type"]
-        merged_extra_config = dict(defaults.get("extra_config", {}))
-        merged_extra_config.update(existing_item.extra_config or {})
-        existing_item.extra_config = merged_extra_config
+        existing_item.extra_config = ModuleConfigRepository._merge_extra_config(
+            defaults.get("extra_config", {}),
+            existing_item.extra_config or {},
+        )
+
+    @staticmethod
+    def _is_stale_placeholder_config(existing_item: ModuleConfig, defaults: dict) -> bool:
+        if defaults.get("collector_type") not in {"dingtalk", "real"}:
+            return False
+        if existing_item.collector_type != "fixture":
+            return False
+        module_code = existing_item.module_code
+        placeholder_doc_key = f"doc_{module_code}_real"
+        return (
+            existing_item.source_doc_key == placeholder_doc_key
+            or str(existing_item.source_url or "").startswith("https://dingtalk.example.com/")
+        )
+
+    @staticmethod
+    def _merge_extra_config(default_extra: dict, existing_extra: dict, *, drop_fixture_keys: bool = False) -> dict:
+        sanitized_existing = dict(existing_extra or {})
+        if drop_fixture_keys:
+            for key in (
+                "structured_payload",
+                "structured_payload_path",
+                "state_payload",
+                "state_payload_path",
+                "fallback_payload",
+                "fallback_payload_path",
+            ):
+                sanitized_existing.pop(key, None)
+        merged_extra_config = dict(default_extra or {})
+        merged_extra_config.update(sanitized_existing)
+        return merged_extra_config

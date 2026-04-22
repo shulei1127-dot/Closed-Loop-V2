@@ -68,6 +68,8 @@ class _PtsVisitRuntime:
     content_id: str | None = None
     final_link: str | None = None
     visit_type: str | None = None
+    matched_product_name: str | None = None
+    matched_form_name: str | None = None
 
 
 class _PtsRunnerError(Exception):
@@ -177,6 +179,7 @@ class _PtsBrowserSession:
                 "error_message": "PTS 会话已失效，请重新登录 PTS 或更新 Cookie",
                 "retryable": False,
             }
+        self._current_project_url = normalized_target
         return {
             "action": "open_pts_delivery_link",
             "status": "success",
@@ -199,21 +202,21 @@ class _PtsBrowserSession:
             "JSON.stringify({status:xhr.status,responseURL:(xhr.responseURL||''),text:xhr.responseText,url:window.location.href});}"
             "catch(e){JSON.stringify({status:0,error:String(e),url:window.location.href});}"
         )
-        raw = await self._run_applescript(
-            f'''
-            tell application "Google Chrome"
-              return execute active tab of front window javascript {json.dumps(js)}
-            end tell
-            '''
-        )
-        try:
-            result = json.loads(raw or "{}")
-        except json.JSONDecodeError as exc:
-            raise _PtsRunnerError(
-                error_message="Chrome 会话执行返回非法结果",
-                error_type="response_invalid",
-                retryable=False,
-            ) from exc
+        if self._current_project_url:
+            raw_result = await self.execute_js_on_project(self._current_project_url, js)
+        else:
+            raw_result = await self.execute_js(js)
+        if isinstance(raw_result, dict):
+            result = raw_result
+        else:
+            try:
+                result = json.loads(str(raw_result or "{}"))
+            except json.JSONDecodeError as exc:
+                raise _PtsRunnerError(
+                    error_message="Chrome 会话执行返回非法结果",
+                    error_type="response_invalid",
+                    retryable=False,
+                ) from exc
         status = int(result.get("status") or 0)
         url = str(result.get("url") or "")
         response_url = str(result.get("responseURL") or "")
@@ -280,6 +283,102 @@ class _PtsBrowserSession:
         except json.JSONDecodeError:
             return raw
 
+    async def execute_js_on_project(self, target: str, script: str) -> Any:
+        normalized_target = strip_url_fragment(target)
+        raw = await self._run_applescript(
+            f'''
+            tell application "Google Chrome"
+              activate
+              set targetUrl to {json.dumps(normalized_target)}
+              if (count of windows) = 0 then make new window
+              set matchedWindowIndex to 0
+              set matchedTabIndex to 0
+              repeat with windowIndex from 1 to count of windows
+                tell window windowIndex
+                  repeat with tabIndex from 1 to count of tabs
+                    set currentUrl to URL of tab tabIndex
+                    if currentUrl contains targetUrl then
+                      set matchedWindowIndex to windowIndex
+                      set matchedTabIndex to tabIndex
+                      exit repeat
+                    end if
+                  end repeat
+                end tell
+                if matchedWindowIndex is not 0 then exit repeat
+              end repeat
+              if matchedWindowIndex is 0 then
+                tell front window
+                  make new tab with properties {{URL:targetUrl}}
+                  set matchedWindowIndex to 1
+                  set matchedTabIndex to (count of tabs)
+                end tell
+              end if
+              set index of window matchedWindowIndex to 1
+              tell window matchedWindowIndex
+                set active tab index to matchedTabIndex
+                set currentUrl to URL of tab matchedTabIndex
+                if currentUrl does not contain targetUrl then
+                  set URL of tab matchedTabIndex to targetUrl
+                  delay 1
+                end if
+                return execute tab matchedTabIndex javascript {json.dumps(script, ensure_ascii=False)}
+              end tell
+            end tell
+            '''
+        )
+        self._current_project_url = normalized_target
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+
+    async def execute_js_on_project_background(self, target: str, script: str) -> Any:
+        normalized_target = strip_url_fragment(target)
+        raw = await self._run_applescript(
+            f'''
+            tell application "Google Chrome"
+              set targetUrl to {json.dumps(normalized_target)}
+              if (count of windows) = 0 then make new window
+              set matchedWindowIndex to 0
+              set matchedTabIndex to 0
+              repeat with windowIndex from 1 to count of windows
+                tell window windowIndex
+                  repeat with tabIndex from 1 to count of tabs
+                    set currentUrl to URL of tab tabIndex
+                    if currentUrl contains targetUrl then
+                      set matchedWindowIndex to windowIndex
+                      set matchedTabIndex to tabIndex
+                      exit repeat
+                    end if
+                  end repeat
+                end tell
+                if matchedWindowIndex is not 0 then exit repeat
+              end repeat
+              if matchedWindowIndex is 0 then
+                tell window 1
+                  make new tab with properties {{URL:targetUrl}}
+                  set matchedWindowIndex to 1
+                  set matchedTabIndex to (count of tabs)
+                end tell
+                delay 1
+              end if
+              tell window matchedWindowIndex
+                set currentUrl to URL of tab matchedTabIndex
+                if currentUrl does not contain targetUrl then
+                  set URL of tab matchedTabIndex to targetUrl
+                  delay 1
+                end if
+                return execute tab matchedTabIndex javascript {json.dumps(script, ensure_ascii=False)}
+              end tell
+            end tell
+            '''
+        )
+        self._current_project_url = normalized_target
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+
     async def send_key_code(self, key_code: int) -> None:
         await self._run_applescript(
             f'''
@@ -303,6 +402,103 @@ class _PtsBrowserSession:
             end tell
             '''
         )
+
+    async def trigger_frontend_file_upload_dialog(self, target: str) -> dict[str, Any]:
+        normalized_target = strip_url_fragment(target)
+        script = """
+        (() => {
+          const toResult = (status, detail) => JSON.stringify({ status, ...detail });
+          const keywords = ["上传文件", "上传附件", "上传", "附件"];
+          const textOf = (el) => (el && (el.innerText || el.textContent || "") || "").trim();
+          const candidates = Array.from(
+            document.querySelectorAll(
+              'button, [role="button"], .ant-btn, .ant-upload, .ant-upload-text, .ant-upload-select, a, span'
+            )
+          );
+          for (const el of candidates) {
+            const txt = textOf(el);
+            if (!txt) continue;
+            if (keywords.some((k) => txt.includes(k))) {
+              try {
+                el.click();
+                return toResult("success", { trigger: "click_text", text: txt });
+              } catch (e) {
+                return toResult("failed", { trigger: "click_text", text: txt, error: String(e) });
+              }
+            }
+          }
+          const input = document.querySelector('input[type="file"]');
+          if (input) {
+            try {
+              input.click();
+              return toResult("success", { trigger: "input_click", text: "input[type=file]" });
+            } catch (e) {
+              return toResult("failed", { trigger: "input_click", text: "input[type=file]", error: String(e) });
+            }
+          }
+          return toResult("failed", { trigger: "none", error: "未找到上传入口" });
+        })()
+        """
+        result = await self.execute_js_on_project(normalized_target, script)
+        if not isinstance(result, dict):
+            return {
+                "action": "trigger_frontend_upload_dialog",
+                "status": "failed",
+                "error_type": "response_invalid",
+                "error_message": "触发 PTS 前端上传窗口失败：返回结果无效",
+                "retryable": False,
+            }
+        status = str(result.get("status") or "").strip()
+        if status == "success":
+            return {
+                "action": "trigger_frontend_upload_dialog",
+                "status": "success",
+                "trigger": str(result.get("trigger") or ""),
+                "trigger_text": str(result.get("text") or ""),
+            }
+        return {
+            "action": "trigger_frontend_upload_dialog",
+            "status": "failed",
+            "error_type": "response_invalid",
+            "error_message": (
+                f"触发 PTS 前端上传窗口失败: trigger={result.get('trigger')}; "
+                f"detail={result.get('error') or result.get('text') or 'unknown'}"
+            ),
+            "retryable": False,
+        }
+
+    async def choose_file_in_dialog(self, file_path: str) -> dict[str, Any]:
+        # macOS file picker: Cmd+Shift+G -> paste full path -> Enter -> Enter
+        try:
+            await self._run_applescript(
+                f'''
+                tell application "Google Chrome" to activate
+                delay 0.08
+                tell application "System Events"
+                  keystroke "G" using {{command down, shift down}}
+                  delay 0.16
+                  keystroke {json.dumps(file_path)}
+                  delay 0.08
+                  key code 36
+                  delay 0.08
+                  key code 36
+                end tell
+                '''
+            )
+            return {
+                "action": "choose_file_in_dialog",
+                "status": "success",
+                "file_path": file_path,
+            }
+        except _PtsRunnerError as exc:
+            return {
+                "action": "choose_file_in_dialog",
+                "status": "failed",
+                "file_path": file_path,
+                "error_type": exc.error_type,
+                "error_message": exc.error_message,
+                "retryable": exc.retryable,
+            }
 
     async def _run_applescript(self, script: str) -> str:
         def _invoke() -> subprocess.CompletedProcess[str]:
@@ -898,13 +1094,6 @@ class VisitRealRunner:
                     error_type="response_invalid",
                     retryable=False,
                 )
-            if desired_owner and runtime.visitor_name and runtime.visitor_name != desired_owner:
-                raise _PtsRunnerError(
-                    error_message=f"PTS 当前会话用户不是 {desired_owner}",
-                    error_type="business_rejected",
-                    retryable=False,
-                )
-
             delivery_id = action.get("delivery_id") or context.normalized_data.get("delivery_id")
             delivery_meta = await query_func(_build_delivery_meta_query(delivery_id))
             runtime.company_id = _read_path(delivery_meta, "list_product_delivery.data.0.project.company.id")
@@ -919,8 +1108,16 @@ class VisitRealRunner:
                 )
             runtime.contact_id = contact.get("id")
             runtime.contact_name = contact.get("name")
-            runtime.product_id = _read_path(delivery_meta, "list_product_delivery.data.0.project.product_detail_list.0.product.id")
-            runtime.product_form_id = _read_path(delivery_meta, "list_product_delivery.data.0.project.product_detail_list.0.form.id")
+            product_detail_list = _read_path(delivery_meta, "list_product_delivery.data.0.project.product_detail_list") or []
+            selected_product_detail = _select_product_detail(
+                product_detail_list,
+                product_id_hint=context.normalized_data.get("product_id_hint"),
+                product_name_hint=context.normalized_data.get("product_name_hint"),
+            )
+            runtime.product_id = _read_path(selected_product_detail, "product.id")
+            runtime.product_form_id = _read_path(selected_product_detail, "form.id")
+            runtime.matched_product_name = _read_path(selected_product_detail, "product.name")
+            runtime.matched_form_name = _read_path(selected_product_detail, "form.name")
             if not runtime.company_id or not runtime.contact_id or not runtime.product_id or not runtime.product_form_id:
                 raise _PtsRunnerError(
                     error_message="PTS 项目详情缺少创建回访所需字段",
@@ -979,6 +1176,13 @@ class VisitRealRunner:
                 "final_link": runtime.final_link,
                 "visit_id": runtime.visit_id,
                 "contact_name": runtime.contact_name,
+                "matched_product_id": runtime.product_id,
+                "matched_product_name": runtime.matched_product_name,
+                "matched_form_id": runtime.product_form_id,
+                "matched_form_name": runtime.matched_form_name,
+                "dingtalk_visit_owner": desired_owner,
+                "pts_current_user": runtime.visitor_name,
+                "owner_source": "pts_current_user",
             }
         except _PtsRunnerError as exc:
             return _failed_action(
@@ -995,19 +1199,15 @@ class VisitRealRunner:
         runtime: _PtsVisitRuntime,
     ) -> dict[str, Any]:
         owner = action.get("owner") or "舒磊"
-        if runtime.visitor_name and owner and runtime.visitor_name != owner:
-            return _failed_action(
-                action="assign_owner",
-                error_message=f"PTS 当前会话用户不是 {owner}",
-                error_type="business_rejected",
-                retryable=False,
-            )
         return {
             "action": "assign_owner",
             "status": "success",
             "http_status": 200,
             "owner": owner,
+            "assigned_owner": runtime.visitor_name or owner,
             "owner_source": "pts_current_user",
+            "dingtalk_visit_owner": owner,
+            "owner_mismatch_allowed": bool(runtime.visitor_name and owner and runtime.visitor_name != owner),
         }
 
     async def _mark_visit_target_direct(
@@ -1781,7 +1981,7 @@ def _failed_action(
 
 def _map_pts_visit_type(value: Any) -> str | None:
     if value is None:
-        return None
+        return PTS_VISIT_TYPE_MAP.get("客户满意度调研")
     return PTS_VISIT_TYPE_MAP.get(str(value).strip())
 
 
@@ -1805,6 +2005,32 @@ def _select_contact(contacts: list[dict[str, Any]], desired_name: Any) -> dict[s
             if name and name in contact_name:
                 return contact
     return contacts[0]
+
+
+def _select_product_detail(
+    product_detail_list: list[dict[str, Any]] | None,
+    *,
+    product_id_hint: Any = None,
+    product_name_hint: Any = None,
+) -> dict[str, Any]:
+    rows = [item for item in (product_detail_list or []) if isinstance(item, dict)]
+    if not rows:
+        return {}
+
+    hint_id = str(product_id_hint or "").strip()
+    if hint_id:
+        for item in rows:
+            if str(_read_path(item, "product.id") or "").strip() == hint_id:
+                return item
+
+    hint_name = str(product_name_hint or "").strip().lower()
+    if hint_name:
+        for item in rows:
+            product_name = str(_read_path(item, "product.name") or "").strip().lower()
+            if product_name and product_name == hint_name:
+                return item
+
+    return rows[0]
 
 
 def _build_visit_detail_link(base_url: str, visit_id: str | None) -> str | None:
