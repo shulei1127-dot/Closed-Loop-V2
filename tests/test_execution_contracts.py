@@ -120,25 +120,29 @@ def test_execution_contract_precheck_failed_config_payloads_are_uniform(
                 monkeypatch.setenv("VISIT_REAL_BASE_URL", ""),
                 monkeypatch.setenv("VISIT_REAL_TOKEN", ""),
                 monkeypatch.setenv("PTS_COOKIE_HEADER", ""),
+                monkeypatch.setenv("PTS_BROWSER_PROFILE_ENABLED", "false"),
             ),
             "missing_field": "pts_cookie_header",
         },
         "inspection": {
             "enable_env": "INSPECTION_REAL_EXECUTION_ENABLED",
             "prepare": lambda: (
-                monkeypatch.delenv("INSPECTION_REAL_BASE_URL", raising=False),
-                monkeypatch.delenv("INSPECTION_REAL_TOKEN", raising=False),
+                monkeypatch.setenv("INSPECTION_REAL_BASE_URL", ""),
+                monkeypatch.setenv("INSPECTION_REAL_TOKEN", ""),
                 monkeypatch.setenv("PTS_COOKIE_HEADER", ""),
+                monkeypatch.setenv("PTS_BROWSER_PROFILE_ENABLED", "false"),
             ),
             "missing_field": "pts_cookie_header",
         },
         "proactive": {
             "enable_env": "PROACTIVE_REAL_EXECUTION_ENABLED",
             "prepare": lambda: (
-                monkeypatch.delenv("PROACTIVE_REAL_BASE_URL", raising=False),
-                monkeypatch.delenv("PROACTIVE_REAL_TOKEN", raising=False),
+                monkeypatch.setenv("PROACTIVE_REAL_BASE_URL", ""),
+                monkeypatch.setenv("PROACTIVE_REAL_TOKEN", ""),
+                monkeypatch.setenv("PTS_COOKIE_HEADER", ""),
+                monkeypatch.setenv("PTS_BROWSER_PROFILE_ENABLED", "false"),
             ),
-            "missing_field": "proactive_real_base_url",
+            "missing_field": "pts_cookie_header",
         },
     }
 
@@ -156,7 +160,8 @@ def test_execution_contract_precheck_failed_config_payloads_are_uniform(
         payload = response.json()["item"]
 
         assert payload["run_status"] == "precheck_failed"
-        _assert_result_contract(payload, expected_mode="real_precheck", module_code=module_code)
+        diagnostics_module_code = "visit" if module_code == "proactive" else module_code
+        _assert_result_contract(payload, expected_mode="real_precheck", module_code=diagnostics_module_code)
         diagnostics = payload["result_payload"]["runner_diagnostics"]
         assert diagnostics["config_valid"] is False
         assert diagnostics["missing_fields"]

@@ -37,6 +37,8 @@ MODULE_DEFINITIONS = {
             "parallelv2_structure_payload_path": str(PROJECT_ROOT / "tests" / "fixtures" / "dingtalk" / "visit" / "document_data_live.json"),
             "parallelv2_token_header": "A-Token",
             "playwright_fallback_enabled": False,
+            "execute_cron": "",
+            "execute_dry_run": False,
         },
     },
     "inspection": {
@@ -79,6 +81,8 @@ MODULE_DEFINITIONS = {
             "parallelv2_dentry_key": "pkEZPjVb9HGZX53X",
             "parallelv2_token_header": "A-Token",
             "playwright_fallback_enabled": False,
+            "execute_cron": "",
+            "execute_dry_run": False,
         },
     },
 }

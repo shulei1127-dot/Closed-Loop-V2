@@ -1104,9 +1104,7 @@ class OpsService:
                 return False
             return self._inspection_run_counts_as_closed(task_run, normalized_data)
         if task.module_code == "visit":
-            # visit 待执行列表以当前钉钉文档是否已写回回访链接为准，
-            # 不再因为历史 success 吃掉当前仍为空链接的待办。
-            return bool(str(normalized_data.get("visit_link") or "").strip())
+            return self._visit_run_counts_as_closed(task_run, normalized_data)
         if task.module_code == "proactive":
             return self._proactive_run_counts_as_closed(task_run, normalized_data)
         return task_run.run_status in {"success", "simulated_success"}
@@ -1129,9 +1127,7 @@ class OpsService:
         if module_code == "inspection":
             return self._inspection_normalized_state_counts_as_closed(normalized_data)
         if module_code == "visit":
-            # visit pending 口径只看当前钉钉文档行的回访链接是否已回写。
-            # 历史闭环成功但当前文档仍为空时，必须继续展示为待执行。
-            return bool(str(normalized_data.get("visit_link") or "").strip())
+            return self._visit_run_counts_as_closed(latest_success, normalized_data)
         if module_code == "proactive":
             return self._proactive_run_counts_as_closed(latest_success, normalized_data)
         return True

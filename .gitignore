@@ -6,4 +6,6 @@ __pycache__/
 .ruff_cache/
 *.pyc
 .env
+.pts-browser-profile/
 .DS_Store
+.server.pid

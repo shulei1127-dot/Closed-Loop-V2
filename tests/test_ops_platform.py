@@ -3,7 +3,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 
 from apps.api.main import app
@@ -16,13 +16,14 @@ from models.normalized_record import NormalizedRecord
 from models.source_snapshot import SourceSnapshot
 from models.task_plan import TaskPlan
 from models.task_run import TaskRun
-from scheduler.jobs import register_jobs, run_scheduled_sync_job
+from scheduler.jobs import register_jobs, run_scheduled_execute_pending_job, run_scheduled_sync_job
 from services.browser_extension_auth_service import BrowserExtensionAuthService
 from services.environment_check import EnvironmentCheckService
 from services.collectors.visit_collector import VisitCollector
 from services.executors.schemas import ExecutionResult
 from services.executors.visit_executor import VisitExecutor
 from services.pts_session_service import PtsSessionService
+from services.sync_service import SyncService
 
 
 def _get_planned_task(db_session, module_code: str) -> TaskPlan:
@@ -62,6 +63,99 @@ def test_scheduler_registers_interval_job_and_runs_sync(client, db_session) -> N
     ).first()
     assert latest_snapshot is not None
     assert latest_snapshot.raw_meta["_ops"]["trigger"] == "scheduler"
+
+
+def test_scheduler_sync_sends_dingtalk_summary(db_session, monkeypatch) -> None:
+    messages: list[dict] = []
+
+    def fake_send_scheduler_summary_notification(**kwargs) -> None:
+        messages.append(kwargs)
+
+    monkeypatch.setattr("scheduler.jobs._send_scheduler_summary_notification", fake_send_scheduler_summary_notification)
+
+    testing_session_factory = sessionmaker(
+        bind=db_session.get_bind(),
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+    )
+
+    run_scheduled_sync_job("visit", session_factory=testing_session_factory)
+
+    assert len(messages) == 1
+    payload = messages[0]
+    assert payload["event_type"] == "sync"
+    assert payload["module_code"] == "visit"
+    assert "17:55 定时同步摘要" in payload["message_text"]
+    assert "交付转售后回访闭环" in payload["message_text"]
+    assert "任务规划：待执行" in payload["message_text"]
+
+
+def test_scheduler_registers_execute_job_and_runs_pending_visit_tasks(db_session, monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "false")
+    monkeypatch.setenv("VISIT_REAL_EXECUTION_ENABLED", "false")
+    get_settings.cache_clear()
+    asyncio.run(SyncService(db_session).run_sync("visit", trigger="manual"))
+    config = db_session.scalars(select(ModuleConfig).where(ModuleConfig.module_code == "visit")).one()
+    config.extra_config = {
+        **(config.extra_config or {}),
+        "execute_cron": "0 18 * * *",
+        "execute_dry_run": False,
+    }
+    db_session.commit()
+
+    testing_session_factory = sessionmaker(
+        bind=db_session.get_bind(),
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+    )
+    scheduler = BackgroundScheduler()
+    job_ids = register_jobs(scheduler, session_factory=testing_session_factory)
+
+    assert "execute:visit" in job_ids
+
+    before_count = db_session.scalar(select(func.count()).select_from(TaskRun)) or 0
+    run_scheduled_execute_pending_job("visit", session_factory=testing_session_factory)
+    after_count = db_session.scalar(select(func.count()).select_from(TaskRun)) or 0
+
+    assert after_count > before_count
+    latest_run = db_session.scalars(select(TaskRun).order_by(TaskRun.run_time.desc())).first()
+    assert latest_run is not None
+    assert latest_run.result_payload["_ops"]["trigger"] == "scheduler"
+    get_settings.cache_clear()
+
+
+def test_scheduler_execute_sends_dingtalk_summary(db_session, monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "false")
+    monkeypatch.setenv("VISIT_REAL_EXECUTION_ENABLED", "false")
+    get_settings.cache_clear()
+    asyncio.run(SyncService(db_session).run_sync("visit", trigger="manual"))
+
+    messages: list[dict] = []
+
+    def fake_send_scheduler_summary_notification(**kwargs) -> None:
+        messages.append(kwargs)
+
+    monkeypatch.setattr("scheduler.jobs._send_scheduler_summary_notification", fake_send_scheduler_summary_notification)
+
+    testing_session_factory = sessionmaker(
+        bind=db_session.get_bind(),
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+    )
+
+    run_scheduled_execute_pending_job("visit", session_factory=testing_session_factory)
+
+    assert len(messages) == 1
+    payload = messages[0]
+    assert payload["event_type"] == "execute"
+    assert payload["module_code"] == "visit"
+    assert "18:00 定时执行摘要" in payload["message_text"]
+    assert "交付转售后回访闭环" in payload["message_text"]
+    assert "候选任务：" in payload["message_text"]
+    get_settings.cache_clear()
 
 
 def test_sync_auto_retry_for_temporary_failure(client, db_session, monkeypatch) -> None:
@@ -168,45 +262,40 @@ def test_batch_execute_pending_visit_tasks(client, db_session, monkeypatch) -> N
 
 
 def test_pending_visit_list_excludes_rows_with_existing_successful_run(client, db_session, monkeypatch) -> None:
-    monkeypatch.setenv("ENABLE_REAL_EXECUTION", "true")
-    monkeypatch.setenv("VISIT_REAL_EXECUTION_ENABLED", "true")
-    monkeypatch.delenv("VISIT_REAL_BASE_URL", raising=False)
-    monkeypatch.delenv("VISIT_REAL_TOKEN", raising=False)
-    monkeypatch.setenv("PTS_BASE_URL", "https://pts.example.com")
-    monkeypatch.setenv("PTS_COOKIE_HEADER", "")
-    monkeypatch.setattr("services.executors.visit_real_runner.VisitRealRunner._browser_session_available", lambda self: True)
-    get_settings.cache_clear()
     client.post("/api/sync/run", json={"module_code": "visit", "force": False})
     task = _get_planned_task(db_session, "visit")
-
-    from services.executors.visit_real_runner import VisitRealRunOutcome, VisitRealRunner
-
-    async def fake_browser_run(self, context, actions, diagnostics):
-        diagnostics["transport_mode"] = "pts_browser_session"
-        diagnostics["config_valid"] = True
-        return VisitRealRunOutcome(
+    db_session.add(
+        TaskRun(
+            task_plan_id=task.id,
             run_status="success",
+            manual_required=False,
+            result_payload={
+                "execution_mode": "real",
+                "final_link": "https://pts.example.com/return-visit/detail/pending-hidden",
+                "postcheck_passed": True,
+                "closure_confirmed": True,
+                "delivery_bound_confirmed": True,
+                "feedback_confirmed": True,
+                "runner_diagnostics": {
+                    "postcheck": {
+                        "postcheck_passed": True,
+                        "closure_confirmed": True,
+                        "delivery_bound_confirmed": True,
+                        "feedback_confirmed": True,
+                    }
+                },
+            },
             final_link="https://pts.example.com/return-visit/detail/pending-hidden",
-            action_results=[{"action": "complete_visit", "status": "success", "http_status": 200}],
-            runner_diagnostics=diagnostics,
+            error_message=None,
+            executor_version="test",
         )
-
-    monkeypatch.setattr(VisitRealRunner, "_run_pts_browser_mode", fake_browser_run)
-    execute_response = client.post(f"/api/tasks/{task.id}/execute", json={"dry_run": False})
-    assert execute_response.status_code == 200
-    assert execute_response.json()["item"]["run_status"] == "success"
-
-    record = db_session.get(NormalizedRecord, task.normalized_record_id)
-    assert record is not None
-    data = dict(record.normalized_data or {})
-    data["visit_link"] = "https://pts.example.com/return-visit/detail/pending-hidden"
-    record.normalized_data = data
+    )
     db_session.commit()
 
-    pending = client.get("/api/ops/overview").json()["items"]
-    visit_item = next(item for item in pending if item["module_code"] == "visit")
-    assert visit_item["planned_tasks"] == 0
-    get_settings.cache_clear()
+    from services.ops_service import OpsService
+
+    pending_items = OpsService(db_session).list_pending_tasks(module_code="visit", limit=20)
+    assert all(item.task_plan_id != str(task.id) for item in pending_items)
 
 
 def test_execute_conflict_returns_409(client, db_session) -> None:
@@ -277,17 +366,33 @@ def test_ops_api_and_console_render_failure_and_manual_required(client, db_sessi
 def test_ops_overview_counts_only_pending_planned_tasks(client, db_session) -> None:
     client.post("/api/sync/run", json={"module_code": "visit", "force": False})
     task = _get_planned_task(db_session, "visit")
-    overview_before = client.get("/api/ops/overview")
-    assert overview_before.status_code == 200
-    visit_before = next(item for item in overview_before.json()["items"] if item["module_code"] == "visit")
-    assert visit_before["planned_tasks"] >= 1
+    from services.ops_service import OpsService
+
+    ops_service = OpsService(db_session)
+    overview_before = ops_service.build_overview()
+    visit_before = next(item for item in overview_before if item.module_code == "visit")
+    assert visit_before.planned_tasks >= 1
 
     db_session.add(
         TaskRun(
             task_plan_id=task.id,
             run_status="success",
             manual_required=False,
-            result_payload={"execution_mode": "real"},
+            result_payload={
+                "execution_mode": "real",
+                "postcheck_passed": True,
+                "closure_confirmed": True,
+                "delivery_bound_confirmed": True,
+                "feedback_confirmed": True,
+                "runner_diagnostics": {
+                    "postcheck": {
+                        "postcheck_passed": True,
+                        "closure_confirmed": True,
+                        "delivery_bound_confirmed": True,
+                        "feedback_confirmed": True,
+                    }
+                },
+            },
             final_link="https://pts.example.com/return-visit/detail/success-1",
             error_message=None,
             executor_version="test",
@@ -295,22 +400,10 @@ def test_ops_overview_counts_only_pending_planned_tasks(client, db_session) -> N
     )
     db_session.commit()
 
-    overview_after = client.get("/api/ops/overview")
-    assert overview_after.status_code == 200
-    visit_after = next(item for item in overview_after.json()["items"] if item["module_code"] == "visit")
-    assert visit_after["planned_tasks"] == visit_before["planned_tasks"]
-
-    record = db_session.get(NormalizedRecord, task.normalized_record_id)
-    assert record is not None
-    data = dict(record.normalized_data or {})
-    data["visit_link"] = "https://pts.example.com/return-visit/detail/success-1"
-    record.normalized_data = data
-    db_session.commit()
-
-    overview_after_with_link = client.get("/api/ops/overview")
-    assert overview_after_with_link.status_code == 200
-    visit_after_with_link = next(item for item in overview_after_with_link.json()["items"] if item["module_code"] == "visit")
-    assert visit_after_with_link["planned_tasks"] == visit_before["planned_tasks"] - 1
+    ops_service = OpsService(db_session)
+    overview_after = ops_service.build_overview()
+    visit_after = next(item for item in overview_after if item.module_code == "visit")
+    assert visit_after.planned_tasks == visit_before.planned_tasks - 1
 
 
 def test_ops_pending_inspection_keeps_simulated_runs_pending(db_session) -> None:
@@ -579,6 +672,8 @@ def test_pts_session_api_updates_local_env(client, monkeypatch, tmp_path: Path) 
     env_path = tmp_path / ".env"
     env_path.write_text("PTS_BASE_URL=https://pts.chaitin.net\nPTS_COOKIE_HEADER=\nPTS_VERIFY_SSL=true\n", encoding="utf-8")
     monkeypatch.setattr("services.pts_session_service.DEFAULT_ENV_PATH", env_path)
+    monkeypatch.setenv("PTS_BROWSER_PROFILE_ENABLED", "false")
+    get_settings.cache_clear()
 
     status = client.get("/api/ops/pts-session")
     assert status.status_code == 200
@@ -593,6 +688,7 @@ def test_pts_session_api_updates_local_env(client, monkeypatch, tmp_path: Path) 
 
     refreshed = PtsSessionService(env_path=env_path).get_status()
     assert refreshed["configured"] is True
+    get_settings.cache_clear()
 
 
 def test_extension_collect_auth_updates_pts_session_from_sources(client, monkeypatch, tmp_path: Path) -> None:

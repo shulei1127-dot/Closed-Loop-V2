@@ -10,6 +10,12 @@ from core.db import SessionLocal, probe_database_connection, safe_database_url
 from repositories.module_config_repo import ModuleConfigRepository
 from repositories.source_snapshot_repo import SourceSnapshotRepository
 from services.module_registry import default_module_configs
+from services.pts_browser_profile_session import (
+    pts_browser_profile_configured,
+    pts_browser_profile_enabled,
+    pts_direct_http_enabled,
+    resolve_pts_profile_dir,
+)
 from services.pts_session_service import PtsSessionService
 from services.recognizers.visit_delivery_backfill import _find_local_chrome_user_data_dir
 
@@ -120,8 +126,11 @@ class EnvironmentCheckService:
             missing_fields = []
             if not self.settings.pts_base_url:
                 missing_fields.append("pts_base_url")
-            browser_session_available = _find_local_chrome_user_data_dir() is not None
-            if not browser_session_available and not self.settings.pts_cookie_header:
+            browser_profile_enabled = pts_browser_profile_enabled(self.settings)
+            browser_profile_configured = pts_browser_profile_configured(self.settings)
+            browser_session_available = browser_profile_configured or _find_local_chrome_user_data_dir() is not None
+            direct_available = bool(self.settings.pts_cookie_header and pts_direct_http_enabled(self.settings))
+            if not browser_profile_configured and not direct_available:
                 missing_fields.append("pts_cookie_header")
             if module_code == "visit" and (self.settings.visit_real_base_url or self.settings.visit_real_token):
                 if not self.settings.visit_real_base_url:
@@ -132,6 +141,10 @@ class EnvironmentCheckService:
                 "ok": not missing_fields,
                 "missing_fields": missing_fields,
                 "browser_session_available": browser_session_available,
+                "browser_profile_enabled": browser_profile_enabled,
+                "browser_profile_configured": browser_profile_configured,
+                "browser_profile_dir": str(resolve_pts_profile_dir(self.settings)),
+                "direct_http_enabled": pts_direct_http_enabled(self.settings),
             }
         missing_fields = [
             field_name

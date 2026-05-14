@@ -30,6 +30,7 @@ def test_proactive_bridge_resolves_delivery_id_from_product_info_graphql(monkeyp
         settings=Settings(
             pts_base_url="https://pts.example.com",
             pts_cookie_header="session=pts-cookie",
+            pts_browser_profile_enabled=False,
         )
     )
     calls = []
@@ -80,7 +81,7 @@ def test_proactive_bridge_resolves_delivery_id_from_product_info_graphql(monkeyp
 
 
 def test_proactive_bridge_accepts_direct_delivery_project_url(monkeypatch) -> None:
-    executor = ProactiveExecutor(settings=Settings(pts_base_url="https://pts.example.com"))
+    executor = ProactiveExecutor(settings=Settings(pts_base_url="https://pts.example.com", pts_browser_profile_enabled=False))
 
     async def fail_query(payload):  # pragma: no cover - should not be called
         raise AssertionError("GraphQL should not run for direct delivery URLs")
@@ -96,3 +97,47 @@ def test_proactive_bridge_accepts_direct_delivery_project_url(monkeypatch) -> No
 
     assert bridge["delivery_id"] == "66a3080301fb92e1766b54a3"
     assert bridge["delivery_resolution_source"] == "delivery_url"
+
+
+def test_proactive_bridge_prefers_browser_profile_graphql(monkeypatch, tmp_path) -> None:
+    profile_dir = tmp_path / "pts-profile"
+    (profile_dir / "Default").mkdir(parents=True)
+    (profile_dir / "Default" / "Preferences").write_text("{}", encoding="utf-8")
+    executor = ProactiveExecutor(
+        settings=Settings(
+            pts_base_url="https://pts.example.com",
+            pts_cookie_header="",
+            pts_browser_profile_dir=str(profile_dir),
+            pts_execution_transport="browser_profile",
+        )
+    )
+    calls = []
+
+    async def fake_browser_query(payload):
+        calls.append(payload)
+        return {
+            "productInfoByID": {
+                "id": "66b5f01ca5e0003e906d55e7",
+                "product_detail": {
+                    "product": {"id": "security_product.safeline", "name": "雷池"},
+                    "form": {"id": "software", "name": "软件版"},
+                },
+                "delivery": {"id": "66a3080301fb92e1766b54a3"},
+            }
+        }
+
+    async def fail_direct(payload):  # pragma: no cover - should not be called
+        raise AssertionError("direct cookie GraphQL should not run in browser_profile mode")
+
+    monkeypatch.setattr(executor, "_query_pts_graphql_payload_via_browser_profile", fake_browser_query)
+    monkeypatch.setattr(executor, "_query_pts_graphql_payload", fail_direct)
+
+    bridge = asyncio.run(
+        executor._build_visit_bridge_context(
+            _context("https://pts.example.com/project/product/66b5f01ca5e0003e906d55e7")
+        )
+    )
+
+    assert calls[0]["operationName"] == "ProductInfoByID"
+    assert bridge["delivery_id"] == "66a3080301fb92e1766b54a3"
+    assert bridge["delivery_resolution_source"] == "product_info_browser_profile_graphql"

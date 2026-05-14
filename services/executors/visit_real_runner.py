@@ -25,6 +25,14 @@ from services.executors.runner_contract import (
     refresh_runner_diagnostics,
 )
 from services.executors.schemas import ExecutorContext
+from services.pts_browser_profile_session import (
+    PtsBrowserProfileError,
+    PtsBrowserProfileSession,
+    pts_browser_profile_configured,
+    pts_browser_profile_required,
+    pts_direct_http_enabled,
+    resolve_pts_profile_dir,
+)
 
 
 PTS_VISIT_TYPE_MAP = {
@@ -552,8 +560,11 @@ class VisitRealRunner:
         else:
             if not self.settings.pts_base_url:
                 missing_fields.append("pts_base_url")
-            # visit 主链 phase-1 默认 direct 优先，要求 Cookie 会话可用。
-            if not self.settings.pts_cookie_header:
+            if (
+                not self._can_use_browser_profile_transport()
+                and not self._can_use_direct_http_transport()
+                and not self._can_use_legacy_browser_session_transport()
+            ):
                 missing_fields.append("pts_cookie_header")
         apply_validation_result(diagnostics, missing_fields)
         if missing_fields:
@@ -572,6 +583,22 @@ class VisitRealRunner:
 
         if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode:
             return await self._run_legacy_api_mode(context, actions, diagnostics)
+
+        if self._can_use_browser_profile_transport():
+            profile_outcome = await self._run_pts_browser_profile_mode(context, actions, diagnostics)
+            if profile_outcome.run_status in {"success", "pending_confirmation"}:
+                return profile_outcome
+            if pts_browser_profile_required(self.settings) or not self._can_use_direct_http_transport():
+                return profile_outcome
+
+            direct_diagnostics = self._base_diagnostics(transport_override="pts_direct")
+            direct_diagnostics["fallback_from"] = "pts_browser_profile"
+            direct_diagnostics["fallback_reason"] = (profile_outcome.runner_diagnostics or {}).get("error_type")
+            return await self._run_pts_direct_mode(context, actions, direct_diagnostics)
+
+        if not self._can_use_direct_http_transport() and self._can_use_legacy_browser_session_transport():
+            browser_diagnostics = self._base_diagnostics(transport_override="pts_browser_session")
+            return await self._run_pts_browser_mode(context, actions, browser_diagnostics)
 
         direct_outcome = await self._run_pts_direct_mode(context, actions, diagnostics)
         if direct_outcome.run_status in {"success", "pending_confirmation"}:
@@ -593,7 +620,22 @@ class VisitRealRunner:
         return bool(self.settings.visit_real_base_url and self.settings.visit_real_token)
 
     def _browser_session_available(self) -> bool:
+        if self._can_use_browser_profile_transport():
+            return True
         return _find_local_chrome_user_data_dir() is not None
+
+    def _can_use_browser_profile_transport(self) -> bool:
+        return bool(self.settings.pts_base_url) and pts_browser_profile_configured(self.settings)
+
+    def _can_use_direct_http_transport(self) -> bool:
+        return bool(
+            self.settings.pts_base_url
+            and self.settings.pts_cookie_header
+            and pts_direct_http_enabled(self.settings)
+        )
+
+    def _can_use_legacy_browser_session_transport(self) -> bool:
+        return bool(self.settings.pts_base_url and self._browser_session_available())
 
     @staticmethod
     def _can_fallback_from_direct(outcome: VisitRealRunOutcome) -> bool:
@@ -892,6 +934,156 @@ class VisitRealRunner:
                     runner_diagnostics=diagnostics,
                 )
         except _PtsRunnerError as exc:
+            action_results = refresh_runner_diagnostics(diagnostics, action_results)
+            mark_runner_failure(
+                diagnostics,
+                error_type=exc.error_type,
+                last_error=exc.error_message,
+            )
+            return VisitRealRunOutcome(
+                run_status="failed",
+                error_message=exc.error_message,
+                retryable=exc.retryable,
+                action_results=action_results,
+                runner_diagnostics=diagnostics,
+            )
+
+    async def _run_pts_browser_profile_mode(
+        self,
+        context: ExecutorContext,
+        actions: list[dict[str, Any]],
+        diagnostics: dict[str, Any],
+    ) -> VisitRealRunOutcome:
+        action_results: list[dict[str, Any]] = []
+        runtime = _PtsVisitRuntime()
+        diagnostics["transport_mode"] = "pts_browser_profile"
+        diagnostics["pts_auth_header"] = "BrowserProfile"
+        diagnostics["pts_browser_profile_dir"] = str(resolve_pts_profile_dir(self.settings))
+        try:
+            async with PtsBrowserProfileSession(self.settings) as browser:
+                open_result = normalize_action_result(
+                    await browser.open_project(actions[0].get("target") or context.normalized_data.get("pts_link"))
+                )
+                action_results.append(open_result)
+                if open_result["status"] != "success":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=open_result,
+                        fallback_message="打开 PTS 链接失败",
+                    )
+
+                create_result = normalize_action_result(
+                    await self._create_visit_work_order_pts(
+                        query_func=browser.graphql,
+                        context=context,
+                        action=actions[1],
+                        owner_action=actions[2],
+                        runtime=runtime,
+                    )
+                )
+                action_results.append(create_result)
+                if create_result["status"] != "success":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=create_result,
+                        fallback_message="创建回访工单失败",
+                    )
+
+                assign_result = normalize_action_result(await self._assign_owner_direct(actions[2], runtime))
+                action_results.append(assign_result)
+                if assign_result["status"] != "success":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=assign_result,
+                        fallback_message="指派负责人失败",
+                    )
+
+                mark_target_result = normalize_action_result(await self._mark_visit_target_direct(actions[3], runtime))
+                action_results.append(mark_target_result)
+                if mark_target_result["status"] != "success":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=mark_target_result,
+                        fallback_message="标记回访对象失败",
+                    )
+
+                fill_feedback_result = normalize_action_result(
+                    await self._fill_feedback_pts(
+                        query_func=browser.graphql,
+                        context=context,
+                        action=actions[4],
+                        runtime=runtime,
+                    )
+                )
+                action_results.append(fill_feedback_result)
+                if fill_feedback_result["status"] != "success":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=fill_feedback_result,
+                        fallback_message="填写反馈失败",
+                    )
+
+                complete_result = normalize_action_result(
+                    await self._complete_visit_pts(
+                        query_func=browser.graphql,
+                        runtime=runtime,
+                    )
+                )
+                action_results.append(complete_result)
+                if complete_result["status"] != "success":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=complete_result,
+                        fallback_message="完成回访失败",
+                    )
+
+                postcheck_result = normalize_action_result(
+                    await self._postcheck_visit_closure(
+                        query_func=browser.graphql,
+                        context=context,
+                        runtime=runtime,
+                    )
+                )
+                action_results.append(postcheck_result)
+                diagnostics["postcheck"] = self._extract_visit_postcheck_summary(postcheck_result)
+                if postcheck_result["status"] == "failed":
+                    return self._failure_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=postcheck_result,
+                        fallback_message="回访工单 post-check 未通过",
+                        final_link=runtime.final_link,
+                    )
+                if postcheck_result["status"] == "pending_confirmation":
+                    return self._pending_confirmation_outcome(
+                        diagnostics=diagnostics,
+                        action_results=action_results,
+                        action_result=postcheck_result,
+                        fallback_message="回访工单状态暂时无法确认，请稍后同步确认",
+                        final_link=runtime.final_link,
+                    )
+
+                writeback_result = await self._run_writeback(context, runtime.final_link)
+                if writeback_result is not None:
+                    action_results.append(normalize_action_result(writeback_result))
+                    diagnostics["writeback"] = {"enabled": True, "status": writeback_result.get("status")}
+
+                action_results = refresh_runner_diagnostics(diagnostics, action_results)
+                mark_runner_success(diagnostics)
+                return VisitRealRunOutcome(
+                    run_status="success",
+                    final_link=runtime.final_link,
+                    retryable=False,
+                    action_results=action_results,
+                    runner_diagnostics=diagnostics,
+                )
+        except PtsBrowserProfileError as exc:
             action_results = refresh_runner_diagnostics(diagnostics, action_results)
             mark_runner_failure(
                 diagnostics,
@@ -1616,10 +1808,25 @@ class VisitRealRunner:
             "User-Agent": "Mozilla/5.0",
         }
 
-    def _base_diagnostics(self) -> dict[str, Any]:
+    def _base_diagnostics(self, *, transport_override: str | None = None) -> dict[str, Any]:
         if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode:
             transport_mode = "legacy_api"
             pts_auth_header = "Cookie"
+        elif transport_override == "pts_direct":
+            transport_mode = "pts_direct"
+            pts_auth_header = "Cookie"
+        elif transport_override == "pts_browser_profile":
+            transport_mode = "pts_browser_profile"
+            pts_auth_header = "BrowserProfile"
+        elif transport_override == "pts_browser_session":
+            transport_mode = "pts_browser_session"
+            pts_auth_header = "ChromeProfile"
+        elif self._can_use_browser_profile_transport():
+            transport_mode = "pts_browser_profile"
+            pts_auth_header = "BrowserProfile"
+        elif not self._can_use_direct_http_transport() and self._can_use_legacy_browser_session_transport():
+            transport_mode = "pts_browser_session"
+            pts_auth_header = "ChromeProfile"
         elif self.settings.visit_prefer_direct_mode:
             transport_mode = "pts_direct"
             pts_auth_header = "Cookie"
@@ -1637,6 +1844,9 @@ class VisitRealRunner:
             pts_base_url=self.settings.pts_base_url,
             pts_verify_ssl=self.settings.pts_verify_ssl,
             pts_auth_header=pts_auth_header,
+            pts_browser_profile_enabled=bool(getattr(self.settings, "pts_browser_profile_enabled", True)),
+            pts_browser_profile_dir=str(resolve_pts_profile_dir(self.settings)),
+            pts_direct_http_enabled=pts_direct_http_enabled(self.settings),
             base_url=self.settings.visit_real_base_url or self.settings.pts_base_url,
             create_endpoint=(
                 self.settings.visit_real_create_endpoint

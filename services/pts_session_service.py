@@ -4,6 +4,11 @@ from datetime import datetime
 from pathlib import Path
 
 from core.config import get_settings
+from services.pts_browser_profile_session import (
+    pts_browser_profile_configured,
+    pts_browser_profile_enabled,
+    resolve_pts_profile_dir,
+)
 
 
 DEFAULT_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
@@ -15,14 +20,23 @@ class PtsSessionService:
 
     def get_status(self) -> dict:
         values = self._read_env_values()
+        settings = get_settings()
+        browser_profile_enabled = pts_browser_profile_enabled(settings)
+        browser_profile_dir = resolve_pts_profile_dir(settings)
+        browser_profile_configured = pts_browser_profile_configured(settings)
         updated_at = None
         if self.env_path.exists():
             updated_at = datetime.fromtimestamp(self.env_path.stat().st_mtime).isoformat()
+        cookie_configured = bool(values.get("PTS_COOKIE_HEADER"))
         return {
-            "configured": bool(values.get("PTS_COOKIE_HEADER")),
-            "base_url": values.get("PTS_BASE_URL") or get_settings().pts_base_url,
-            "source": values.get("PTS_AUTH_SOURCE") or "env_file",
+            "configured": cookie_configured or browser_profile_configured,
+            "base_url": values.get("PTS_BASE_URL") or settings.pts_base_url,
+            "source": values.get("PTS_AUTH_SOURCE") or ("browser_profile" if browser_profile_configured else "env_file"),
             "updated_at": updated_at,
+            "cookie_configured": cookie_configured,
+            "browser_profile_enabled": browser_profile_enabled,
+            "browser_profile_configured": browser_profile_configured,
+            "browser_profile_dir": str(browser_profile_dir),
         }
 
     def update_cookie(self, cookie_header: str) -> dict:

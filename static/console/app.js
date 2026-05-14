@@ -281,6 +281,54 @@ async function loadVisitModuleData(meta) {
     recentPageSize: 5,
   };
 
+  function summarizeAutoExecutable(items) {
+    const safeItems = Array.isArray(items) ? items : [];
+    const executableCount = safeItems.filter((item) => item.can_execute).length;
+    const blockedItems = safeItems.filter((item) => !item.can_execute);
+    const reasonCounts = new Map();
+    blockedItems.forEach((item) => {
+      const reason = item.business_state_label || item.state_label || item.technical_state_label || "不可自动执行";
+      reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+    });
+    const topReason = [...reasonCounts.entries()]
+      .sort((a, b) => b[1] - a[1])[0];
+    return {
+      totalCount: safeItems.length,
+      executableCount,
+      blockedCount: blockedItems.length,
+      topReasonText: topReason ? `${topReason[0]} (${topReason[1]})` : "无",
+    };
+  }
+
+  function renderVisitAutoExecuteStats(summary, sourceLabel) {
+    const stats = document.getElementById("visit-auto-execute-stats");
+    if (stats) {
+      stats.innerHTML = `
+        <div><dt>18:00自动执行（全量）</dt><dd>${escapeHtml(summary.executableCount)}</dd></div>
+        <div><dt>不会自动执行</dt><dd>${escapeHtml(summary.blockedCount)}</dd></div>
+        <div><dt>阻塞原因 Top1</dt><dd>${escapeHtml(summary.topReasonText)}</dd></div>
+      `;
+    }
+    const note = document.getElementById("visit-auto-execute-note");
+    if (note) {
+      note.textContent = `${sourceLabel}待处理 ${summary.totalCount} 个，其中 ${summary.executableCount} 个会在 18:00 自动执行。`;
+    }
+  }
+
+  async function refreshVisitAutoExecuteStats() {
+    try {
+      const sourceItems = owner
+        ? (await getJson("/api/ops/modules/visit/pending?limit=5000")).items || []
+        : (visitState.pendingItems || []);
+      renderVisitAutoExecuteStats(summarizeAutoExecutable(sourceItems), "模块全量");
+    } catch (error) {
+      const note = document.getElementById("visit-auto-execute-note");
+      if (note) {
+        note.textContent = `自动执行前统计加载失败：${error.message}`;
+      }
+    }
+  }
+
   function renderVisitPending() {
     const tbody = document.getElementById("visit-pending-tbody");
     if (!tbody) return;
@@ -482,6 +530,8 @@ async function loadVisitModuleData(meta) {
       },
     }),
   ]);
+
+  await refreshVisitAutoExecuteStats();
 
   const retryMap = [
     ["visit-health-retry", () => loadVisitModuleData(meta)],
@@ -802,6 +852,54 @@ async function loadProactiveModuleData(meta) {
     recentPageSize: 5,
   };
 
+  function summarizeAutoExecutable(items) {
+    const safeItems = Array.isArray(items) ? items : [];
+    const executableCount = safeItems.filter((item) => item.can_execute).length;
+    const blockedItems = safeItems.filter((item) => !item.can_execute);
+    const reasonCounts = new Map();
+    blockedItems.forEach((item) => {
+      const reason = item.business_state_label || item.state_label || item.technical_state_label || "不可自动执行";
+      reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+    });
+    const topReason = [...reasonCounts.entries()]
+      .sort((a, b) => b[1] - a[1])[0];
+    return {
+      totalCount: safeItems.length,
+      executableCount,
+      blockedCount: blockedItems.length,
+      topReasonText: topReason ? `${topReason[0]} (${topReason[1]})` : "无",
+    };
+  }
+
+  function renderProactiveAutoExecuteStats(summary, sourceLabel) {
+    const stats = document.getElementById("proactive-auto-execute-stats");
+    if (stats) {
+      stats.innerHTML = `
+        <div><dt>18:00自动执行（全量）</dt><dd>${escapeHtml(summary.executableCount)}</dd></div>
+        <div><dt>不会自动执行</dt><dd>${escapeHtml(summary.blockedCount)}</dd></div>
+        <div><dt>阻塞原因 Top1</dt><dd>${escapeHtml(summary.topReasonText)}</dd></div>
+      `;
+    }
+    const note = document.getElementById("proactive-auto-execute-note");
+    if (note) {
+      note.textContent = `${sourceLabel}待处理 ${summary.totalCount} 个，其中 ${summary.executableCount} 个会在 18:00 自动执行。`;
+    }
+  }
+
+  async function refreshProactiveAutoExecuteStats() {
+    try {
+      const sourceItems = owner
+        ? (await getJson("/api/ops/modules/proactive/pending?limit=5000")).items || []
+        : (proactiveState.pendingItems || []);
+      renderProactiveAutoExecuteStats(summarizeAutoExecutable(sourceItems), "模块全量");
+    } catch (error) {
+      const note = document.getElementById("proactive-auto-execute-note");
+      if (note) {
+        note.textContent = `自动执行前统计加载失败：${error.message}`;
+      }
+    }
+  }
+
   function renderProactivePending() {
     const tbody = document.getElementById("proactive-pending-tbody");
     if (!tbody) return;
@@ -994,6 +1092,8 @@ async function loadProactiveModuleData(meta) {
       },
     }),
   ]);
+
+  await refreshProactiveAutoExecuteStats();
   ["proactive-health-retry", "proactive-summary-retry", "proactive-pending-retry", "proactive-recent-retry"].forEach((id) => {
     const btn = document.getElementById(id);
     if (!btn || btn.dataset.bound === "1") return;

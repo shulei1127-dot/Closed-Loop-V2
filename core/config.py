@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     pts_base_url: str = "https://pts.chaitin.net"
     pts_cookie_header: str = ""
     pts_verify_ssl: bool = True
+    pts_execution_transport: str = "auto"
+    pts_direct_http_enabled: bool = True
+    pts_browser_profile_enabled: bool = True
+    pts_browser_profile_dir: str = ".pts-browser-profile/chrome-profile"
+    pts_browser_headless: bool = True
+    pts_browser_channel: str = ""
+    pts_browser_context_reuse_enabled: bool = True
     enable_real_execution: bool = False
     visit_real_execution_enabled: bool = False
     visit_real_base_url: str = ""
@@ -59,6 +66,9 @@ class Settings(BaseSettings):
     inspection_deadline_reminder_dingtalk_secret: str = ""
     inspection_deadline_reminder_dingtalk_timeout_seconds: float = 10.0
     inspection_deadline_reminder_query_payload_json: str = ""
+    scheduler_summary_dingtalk_webhook: str = ""
+    scheduler_summary_dingtalk_secret: str = ""
+    scheduler_summary_dingtalk_timeout_seconds: float = 10.0
     proactive_real_execution_enabled: bool = False
     proactive_real_base_url: str = ""
     proactive_real_token: str = ""

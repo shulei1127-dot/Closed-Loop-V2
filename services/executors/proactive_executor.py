@@ -12,6 +12,13 @@ from services.executors.runner_contract import build_simulated_runner_diagnostic
 from services.executors.schemas import ExecutionResult, ExecutorContext
 from services.executors.visit_actions import VisitActionBuilder
 from services.executors.visit_real_runner import VisitRealRunner, _PtsBrowserSession, _PtsRunnerError, _read_path
+from services.pts_browser_profile_session import (
+    PtsBrowserProfileError,
+    PtsBrowserProfileSession,
+    pts_browser_profile_configured,
+    pts_browser_profile_required,
+    pts_direct_http_enabled,
+)
 
 
 DELIVERY_ID_PATTERNS = [
@@ -476,6 +483,9 @@ class ProactiveExecutor:
             if resolved.delivery_id:
                 return resolved
 
+        if not self._can_use_direct_http_transport():
+            return await self._resolve_delivery_id_from_browser_session(product_link, fallback_source="direct_http_disabled")
+
         headers = {
             "Cookie": self.settings.pts_cookie_header,
             "User-Agent": "Mozilla/5.0",
@@ -534,12 +544,52 @@ class ProactiveExecutor:
           });
         })()
         """
+        if self._can_use_browser_profile_transport():
+            try:
+                async with PtsBrowserProfileSession(self.settings) as browser:
+                    raw = await browser.execute_js_on_project_background(product_link, script)
+                return self._extract_delivery_id_from_browser_page_payload(
+                    raw,
+                    fallback_source=fallback_source,
+                    raw_hint=raw_hint,
+                    success_source="browser_profile_product_page",
+                )
+            except PtsBrowserProfileError as exc:
+                if pts_browser_profile_required(self.settings):
+                    return _ResolvedDeliveryContext(
+                        delivery_id=None,
+                        source=exc.error_type,
+                        raw=raw_hint or exc.error_message,
+                    )
+            except Exception as exc:
+                if pts_browser_profile_required(self.settings):
+                    return _ResolvedDeliveryContext(
+                        delivery_id=None,
+                        source="browser_profile_failed",
+                        raw=raw_hint or str(exc),
+                    )
+
         try:
             async with _PtsBrowserSession(self.settings) as browser:
                 raw = await browser.execute_js_on_project_background(product_link, script)
         except Exception as exc:
             return _ResolvedDeliveryContext(delivery_id=None, source=fallback_source, raw=raw_hint or str(exc))
 
+        return self._extract_delivery_id_from_browser_page_payload(
+            raw,
+            fallback_source=fallback_source,
+            raw_hint=raw_hint,
+            success_source="browser_session_product_page",
+        )
+
+    @staticmethod
+    def _extract_delivery_id_from_browser_page_payload(
+        raw: Any,
+        *,
+        fallback_source: str,
+        raw_hint: str | None,
+        success_source: str,
+    ) -> _ResolvedDeliveryContext:
         if not isinstance(raw, dict):
             return _ResolvedDeliveryContext(delivery_id=None, source=fallback_source, raw=raw_hint or str(raw))
 
@@ -555,7 +605,7 @@ class ProactiveExecutor:
             if match is not None:
                 return _ResolvedDeliveryContext(
                     delivery_id=match.group(1),
-                    source="browser_session_product_page",
+                    source=success_source,
                     raw=match.group(0),
                 )
         return _ResolvedDeliveryContext(delivery_id=None, source=fallback_source, raw=raw_hint or combined[:400])
@@ -567,20 +617,37 @@ class ProactiveExecutor:
             "query": _build_product_info_by_id_query(),
         }
         last_error: str | None = None
-        try:
-            data = await self._query_pts_graphql_payload(payload)
-            resolved = self._extract_delivery_context_from_product_info_payload(
-                data,
-                product_info_id=product_info_id,
-                source="product_info_graphql",
-            )
-            if resolved.delivery_id:
-                return resolved
-            last_error = resolved.raw
-        except _PtsRunnerError as exc:
-            last_error = exc.error_message
-            if exc.error_type not in {"session_expired", "http_error", "response_invalid"}:
-                return _ResolvedDeliveryContext(delivery_id=None, source=exc.error_type, raw=exc.error_message)
+        if self._can_use_browser_profile_transport():
+            try:
+                data = await self._query_pts_graphql_payload_via_browser_profile(payload)
+                resolved = self._extract_delivery_context_from_product_info_payload(
+                    data,
+                    product_info_id=product_info_id,
+                    source="product_info_browser_profile_graphql",
+                )
+                if resolved.delivery_id:
+                    return resolved
+                last_error = resolved.raw
+            except _PtsRunnerError as exc:
+                last_error = exc.error_message
+                if pts_browser_profile_required(self.settings):
+                    return _ResolvedDeliveryContext(delivery_id=None, source=exc.error_type, raw=exc.error_message)
+
+        if self._can_use_direct_http_transport():
+            try:
+                data = await self._query_pts_graphql_payload(payload)
+                resolved = self._extract_delivery_context_from_product_info_payload(
+                    data,
+                    product_info_id=product_info_id,
+                    source="product_info_graphql",
+                )
+                if resolved.delivery_id:
+                    return resolved
+                last_error = resolved.raw
+            except _PtsRunnerError as exc:
+                last_error = exc.error_message
+                if exc.error_type not in {"session_expired", "http_error", "response_invalid"}:
+                    return _ResolvedDeliveryContext(delivery_id=None, source=exc.error_type, raw=exc.error_message)
 
         try:
             data = await self._query_pts_graphql_payload_via_browser(payload)
@@ -598,7 +665,7 @@ class ProactiveExecutor:
             return _ResolvedDeliveryContext(delivery_id=None, source="browser_graphql_failed", raw=last_error or str(exc))
 
     async def _query_pts_graphql_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not self.settings.pts_cookie_header:
+        if not self._can_use_direct_http_transport():
             raise _PtsRunnerError(
                 error_message="缺少 PTS Cookie，无法直接查询产品信息",
                 error_type="session_expired",
@@ -658,11 +725,34 @@ class ProactiveExecutor:
             ) from exc
         return _extract_graphql_data(response_payload)
 
+    async def _query_pts_graphql_payload_via_browser_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            async with PtsBrowserProfileSession(self.settings) as browser:
+                await browser.open_project(f"{self.settings.pts_base_url.rstrip('/')}/project")
+                return await browser.graphql_payload(payload)
+        except PtsBrowserProfileError as exc:
+            raise _PtsRunnerError(
+                error_message=exc.error_message,
+                error_type=exc.error_type,
+                retryable=exc.retryable,
+                http_status=exc.http_status,
+            ) from exc
+
     async def _query_pts_graphql_payload_via_browser(self, payload: dict[str, Any]) -> dict[str, Any]:
         anchor_url = f"{self.settings.pts_base_url.rstrip('/')}/project"
         async with _PtsBrowserSession(self.settings) as browser:
             await browser.execute_js_on_project_background(anchor_url, "JSON.stringify({ready:true,url:location.href})")
             return await browser.graphql_payload(payload)
+
+    def _can_use_browser_profile_transport(self) -> bool:
+        return bool(self.settings.pts_base_url) and pts_browser_profile_configured(self.settings)
+
+    def _can_use_direct_http_transport(self) -> bool:
+        return bool(
+            self.settings.pts_base_url
+            and self.settings.pts_cookie_header
+            and pts_direct_http_enabled(self.settings)
+        )
 
     @staticmethod
     def _extract_delivery_context_from_product_info_payload(
