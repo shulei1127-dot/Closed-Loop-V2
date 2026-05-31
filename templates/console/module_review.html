@@ -1,0 +1,83 @@
+{% extends "console/base.html" %}
+
+{% block content %}
+<div id="module-view-meta" data-module-code="review"></div>
+<section class="section">
+  <article class="card module-card">
+    <div class="card-head">
+      <div>
+        <h4>交付转售后审核</h4>
+        <span id="review-summary-meta" class="muted">数据时间：加载中...</span>
+      </div>
+      <div class="card-head-actions">
+        <span id="review-summary-sync-badge" class="badge status-unknown">加载中</span>
+        <button
+          class="action-button"
+          data-action="sync"
+          data-module-code="review"
+        >
+          立即同步
+        </button>
+        <a class="module-entry-link" href="/console">返回模块总览</a>
+      </div>
+    </div>
+    <dl class="stats" id="review-summary-stats">
+      <div><dt>最近同步</dt><dd>加载中</dd></div>
+      <div><dt>最近执行</dt><dd>加载中</dd></div>
+      <div><dt>待审核任务</dt><dd>加载中</dd></div>
+      <div><dt>审核通过</dt><dd>加载中</dd></div>
+      <div><dt>审核失败</dt><dd>加载中</dd></div>
+      <div><dt>需人工处理</dt><dd>加载中</dd></div>
+    </dl>
+    <p id="review-summary-error" class="muted" hidden></p>
+    <button id="review-summary-retry" class="action-button secondary" type="button" hidden>重试加载模块状态</button>
+  </article>
+</section>
+
+<section class="section">
+  <div class="panel">
+    <div class="section-head">
+      <div>
+        <h4>待审核项目</h4>
+      </div>
+      <div class="inline-actions">
+        <button
+          id="review-execute-all-btn"
+          class="action-button danger"
+          data-action="execute-all-review"
+          data-total-count="0"
+          disabled
+        >
+          一键审核全部（后台执行 0）
+        </button>
+      </div>
+    </div>
+    <div id="review-pending-section">
+    <table class="data-table compact-table" id="review-pending-table">
+      <thead>
+        <tr>
+          <th>客户名称</th>
+          <th>项目名称</th>
+          <th>交付阶段</th>
+          <th>售后负责人</th>
+          <th>最近执行</th>
+          <th>状态说明</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="review-pending-tbody">
+        <tr><td colspan="7" class="muted">加载中...</td></tr>
+      </tbody>
+    </table>
+    <div class="table-pagination" id="review-pending-pagination" hidden>
+      <button id="review-pending-prev" class="action-button secondary" type="button">上一页</button>
+      <span id="review-pending-page-info" class="muted">第 1 页 / 共 1 页</span>
+      <button id="review-pending-next" class="action-button secondary" type="button">下一页</button>
+    </div>
+    <p id="review-pending-empty" class="muted" hidden>当前没有待审核项目。</p>
+    <p id="review-pending-error" class="muted" hidden></p>
+    <button id="review-pending-retry" class="action-button secondary" type="button" hidden>重试加载待审核项目</button>
+    </div>
+  </div>
+</section>
+{% endblock %}

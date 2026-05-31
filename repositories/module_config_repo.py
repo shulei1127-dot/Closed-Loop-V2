@@ -38,11 +38,35 @@ class ModuleConfigRepository(BaseRepository):
             existing_item.source_doc_key = defaults["source_doc_key"]
             existing_item.source_view_key = defaults["source_view_key"]
             existing_item.collector_type = defaults["collector_type"]
-            existing_item.extra_config = ModuleConfigRepository._merge_extra_config(
-                defaults.get("extra_config", {}),
-                existing_item.extra_config or {},
-                drop_fixture_keys=True,
-            )
+            default_extra = defaults.get("extra_config", {})
+            # When collector_type changed, use defaults as base and only preserve
+            # non-transport-specific overrides (execute_cron, execute_dry_run, etc.)
+            transport_keys = {
+                "structured_endpoint", "state_endpoint", "structured_method", "state_method",
+                "structured_query_params", "state_query_params", "structured_headers", "state_headers",
+                "structured_json_body", "state_json_body", "structured_response_path",
+                "state_response_path", "structured_columns_path", "state_columns_path",
+                "structured_rows_path", "state_rows_path", "structured_meta_path",
+                "state_meta_path", "static_headers", "static_cookies",
+                "headers_env", "cookies_env", "token_env", "token_header", "token_prefix",
+                "parallelv2_enabled", "parallelv2_direct_access_token_enabled",
+                "parallelv2_dynamic_version_enabled", "parallelv2_access_token_endpoint",
+                "parallelv2_document_data_endpoint", "parallelv2_document_data_method",
+                "parallelv2_document_data_json_body", "parallelv2_endpoint",
+                "parallelv2_query_params", "parallelv2_sheet_id", "parallelv2_view_id",
+                "parallelv2_doc_key", "parallelv2_dentry_key",
+                "parallelv2_structure_payload_path", "parallelv2_token_header",
+                "parallelv2_version_path", "parallelv2_access_token_path",
+                "record_count_endpoint", "record_count_response_path",
+                "playwright_fallback_enabled",
+                "dws_cli_base_id", "dws_cli_table_id",
+                "dws_cli_row_filter",
+            }
+            sanitized_existing = {
+                k: v for k, v in (existing_item.extra_config or {}).items()
+                if k not in transport_keys
+            }
+            existing_item.extra_config = {**default_extra, **sanitized_existing}
             return
 
         if not existing_item.module_name:
@@ -62,16 +86,17 @@ class ModuleConfigRepository(BaseRepository):
 
     @staticmethod
     def _is_stale_placeholder_config(existing_item: ModuleConfig, defaults: dict) -> bool:
-        if defaults.get("collector_type") not in {"dingtalk", "real"}:
-            return False
-        if existing_item.collector_type != "fixture":
-            return False
-        module_code = existing_item.module_code
-        placeholder_doc_key = f"doc_{module_code}_real"
-        return (
-            existing_item.source_doc_key == placeholder_doc_key
-            or str(existing_item.source_url or "").startswith("https://dingtalk.example.com/")
-        )
+        if existing_item.collector_type == "fixture":
+            module_code = existing_item.module_code
+            placeholder_doc_key = f"doc_{module_code}_real"
+            return (
+                existing_item.source_doc_key == placeholder_doc_key
+                or str(existing_item.source_url or "").startswith("https://dingtalk.example.com/")
+            )
+        # Also detect stale config when collector_type has changed in defaults
+        if existing_item.collector_type != defaults.get("collector_type"):
+            return True
+        return False
 
     @staticmethod
     def _merge_extra_config(default_extra: dict, existing_extra: dict, *, drop_fixture_keys: bool = False) -> dict:

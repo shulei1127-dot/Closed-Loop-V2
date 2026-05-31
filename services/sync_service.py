@@ -22,15 +22,17 @@ from schemas.common import ModuleSummaryItem, RecordDetail, SnapshotDetail, Task
 from schemas.sync import CollectResult, SyncRunResponse
 from services.collectors.inspection_collector import InspectionCollector
 from services.collectors.proactive_collector import ProactiveCollector
+from services.collectors.review_collector import ReviewCollector
 from services.collectors.visit_collector import VisitCollector
 from services.module_registry import MODULE_DEFINITIONS, default_module_configs, get_module_definition
 from services.planners.inspection_planner import InspectionPlanner
 from services.planners.proactive_planner import ProactivePlanner
+from services.planners.review_planner import ReviewPlanner
 from services.planners.visit_planner import VisitPlanner
 from services.recognizers.inspection_local_report_backfill import InspectionLocalReportBackfill
-from services.recognizers.inspection_work_order_backfill import InspectionWorkOrderStageBackfill
 from services.recognizers.inspection_recognizer import InspectionRecognizer
 from services.recognizers.proactive_recognizer import ProactiveRecognizer
+from services.recognizers.review_recognizer import ReviewRecognizer
 from services.recognizers.visit_delivery_backfill import VisitDeliveryIdBackfill
 from services.recognizers.visit_recognizer import VisitRecognizer
 
@@ -39,18 +41,21 @@ COLLECTOR_REGISTRY = {
     "visit": VisitCollector,
     "inspection": InspectionCollector,
     "proactive": ProactiveCollector,
+    "review": ReviewCollector,
 }
 
 RECOGNIZER_REGISTRY = {
     "visit": VisitRecognizer,
     "inspection": InspectionRecognizer,
     "proactive": ProactiveRecognizer,
+    "review": ReviewRecognizer,
 }
 
 PLANNER_REGISTRY = {
     "visit": VisitPlanner,
     "inspection": InspectionPlanner,
     "proactive": ProactivePlanner,
+    "review": ReviewPlanner,
 }
 
 ENRICHER_REGISTRY = {
@@ -254,9 +259,21 @@ class SyncService:
             recognition_result = self._filter_recognition_by_sync_months(module_code, recognition_result, sync_months)
             recognition_result = await self._enrich_recognition(module_code, recognition_result)
             record_map = self.record_repo.create_from_recognition(snapshot.id, module_code, recognition_result)
+            # Deduplicate: skip records that already have successful executions
+            recognition_result = self._deduplicate_by_successful_executions(
+                module_code,
+                recognition_result,
+            )
             task_plans = planner.plan(recognition_result.normalized_records)
             created_task_plans = self.task_repo.create_from_dtos(task_plans, record_map)
             self.db.commit()
+            # Keep only the latest successful snapshot — delete older ones
+            deleted = self.snapshot_repo.delete_old_snapshots_for_module(
+                module_code, keep_snapshot_id=snapshot.id,
+            )
+            if deleted:
+                self.db.commit()
+                logger.info("cleaned up %d old snapshot(s) for module=%s", deleted, module_code)
             recognition_counts = self._build_recognition_stats(
                 recognition_result.normalized_records,
                 recognition_result.unresolved_fields,
@@ -305,17 +322,54 @@ class SyncService:
             return recognition_result
         enricher = enricher_cls()
         recognition_result.normalized_records = await enricher.enrich_records(recognition_result.normalized_records)
-        if module_code == "inspection":
-            correction_enabled = bool(getattr(self.settings, "inspection_sync_stage_correction_enabled", False))
-            logger.info(
-                "inspection sync stage correction hook %s",
-                "enabled" if correction_enabled else "disabled",
+        return recognition_result
+
+    def _deduplicate_by_successful_executions(
+        self, module_code: str, recognition_result,
+    ):
+        """Skip records that already have successful executions."""
+        from models.task_run import TaskRun
+
+        source_row_ids = [
+            r.get("source_row_id") or r.get("normalized_data", {}).get("source_row_id")
+            for r in recognition_result.normalized_records
+            if r
+        ]
+        source_row_ids = [sid for sid in source_row_ids if sid]
+
+        if not source_row_ids:
+            return recognition_result
+
+        # Find records that already have successful executions
+        successful_source_rows = self.db.scalars(
+            select(NormalizedRecord.source_row_id)
+            .join(TaskPlan, TaskPlan.normalized_record_id == NormalizedRecord.id)
+            .join(TaskRun, TaskRun.task_plan_id == TaskPlan.id)
+            .where(
+                NormalizedRecord.module_code == module_code,
+                NormalizedRecord.source_row_id.in_(source_row_ids),
+                TaskRun.run_status == "success",
             )
-            if correction_enabled:
-                stage_enricher = InspectionWorkOrderStageBackfill(self.settings)
-                recognition_result.normalized_records = await stage_enricher.enrich_records(
-                    recognition_result.normalized_records
-                )
+        ).all()
+
+        # Filter out records that have successful executions
+        filtered_records = [
+            r
+            for r in recognition_result.normalized_records
+            if r
+            and (r.get("source_row_id") or r.get("normalized_data", {}).get("source_row_id"))
+            not in successful_source_rows
+        ]
+
+        skipped_count = len(recognition_result.normalized_records) - len(filtered_records)
+        if skipped_count > 0:
+            logger.info(
+                "deduplication: skipped %d records with successful executions for module=%s",
+                skipped_count,
+                module_code,
+            )
+
+        recognition_result.normalized_records = filtered_records
         return recognition_result
 
     def _build_module_summary(self, latest: SourceSnapshot, module_name: str) -> ModuleSummaryItem:

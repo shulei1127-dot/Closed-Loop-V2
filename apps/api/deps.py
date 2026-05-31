@@ -2,7 +2,6 @@ from fastapi import Depends
 from sqlalchemy.orm import Session
 
 from core.db import get_db
-from services.reminders.inspection_deadline_service import InspectionDeadlineReminderService
 from services.ops_service import OpsService
 from services.sync_service import SyncService
 from services.task_execution_service import TaskExecutionService
@@ -18,9 +17,3 @@ def get_task_execution_service(db: Session = Depends(get_db)) -> TaskExecutionSe
 
 def get_ops_service(db: Session = Depends(get_db)) -> OpsService:
     return OpsService(db)
-
-
-def get_inspection_deadline_reminder_service(
-    db: Session = Depends(get_db),
-) -> InspectionDeadlineReminderService:
-    return InspectionDeadlineReminderService(db)

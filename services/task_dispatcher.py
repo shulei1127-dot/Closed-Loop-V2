@@ -42,6 +42,8 @@ class TaskDispatcher:
         self._workers: list[asyncio.Task[Any]] = []
         self._started = False
         self._lock = asyncio.Lock()
+        # PTS API 限流：5次/秒，用信号量控制全局并发
+        self._pts_api_semaphore: asyncio.Semaphore | None = None
     async def start(self) -> None:
         async with self._lock:
             if self._started:
@@ -170,6 +172,9 @@ class TaskDispatcher:
             finally:
                 runtime_state.release_queued_task(job["task_plan_id"])
                 self._queue.task_done()
+                # PTS API 限流：每个 job 执行完后等待，避免并发超限
+                if get_settings().pts_api_token:
+                    await asyncio.sleep(3)
 
     async def _execute_job(self, job: dict[str, Any], *, worker_index: int) -> None:
         task_plan_id = job["task_plan_id"]
@@ -238,5 +243,7 @@ def get_task_dispatcher() -> TaskDispatcher:
     global _dispatcher
     if _dispatcher is None:
         settings = get_settings()
-        _dispatcher = TaskDispatcher(worker_count=settings.task_dispatcher_worker_count)
+        # PTS API token 限流 5次/秒，使用单 worker 串行执行避免 429
+        wc = 1 if settings.pts_api_token else settings.task_dispatcher_worker_count
+        _dispatcher = TaskDispatcher(worker_count=wc)
     return _dispatcher

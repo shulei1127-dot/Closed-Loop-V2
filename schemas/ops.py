@@ -148,10 +148,21 @@ class PtsSessionStatusResponse(BaseModel):
     ok: bool = True
     configured: bool = False
     base_url: str | None = None
-    source: str = "env_file"
+    api_base_url: str | None = None
+    source: str = "unconfigured"
     updated_at: datetime | None = None
     message: str | None = None
+    api_token_configured: bool = False
+    cookie_configured: bool = False
+    browser_profile_enabled: bool = False
+    browser_profile_configured: bool = False
+    browser_profile_dir: str | None = None
 
 
 class PtsSessionUpdateRequest(BaseModel):
-    cookie_header: str = Field(min_length=1)
+    cookie_header: str | None = None
+    api_token: str | None = None
+
+    @property
+    def has_any(self) -> bool:
+        return bool(self.cookie_header or self.api_token)

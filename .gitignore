@@ -9,3 +9,6 @@ __pycache__/
 .pts-browser-profile/
 .DS_Store
 .server.pid
+server.log
+.claude/
+alembic/versions/__pycache__/

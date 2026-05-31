@@ -3,72 +3,40 @@
 {% block content %}
 <div id="module-view-meta" data-module-code="visit" data-visit-owner="{{ selected_visit_owner }}"></div>
 <section class="section">
-  <div class="panel module-page-hero">
-    <div>
-      <p class="eyebrow">Visit Module</p>
-      <h3>交付转售后回访</h3>
-      <p class="muted">这里集中看需要创建并闭环的回访任务，以及最近已经成功闭环的回访链接。</p>
-      <div class="visit-owner-filter">
-        <label for="visit-owner-filter">回访人筛选</label>
-        <div class="visit-owner-filter-main">
-          <input
-            id="visit-owner-filter"
-            class="visit-owner-input"
-            list="visit-owner-options"
-            type="text"
-            placeholder="输入回访人姓名，留空或输入“全部”表示不过滤"
-            value="{{ selected_visit_owner }}"
-          />
-          <datalist id="visit-owner-options">
-            <option value="全部"></option>
-          </datalist>
-        </div>
-        <p class="visit-owner-helper">先输入回访人，再点击“立即同步”或“重跑同步”。模块数据将后台异步加载。</p>
+  <article class="card module-card">
+    <div class="card-head">
+      <div>
+        <h4>交付转售后回访</h4>
+        <span id="visit-summary-meta" class="muted">数据时间：加载中...</span>
+      </div>
+      <div class="card-head-actions">
+        <span id="visit-summary-sync-badge" class="badge status-unknown">加载中</span>
+        <button
+          class="action-button"
+          data-action="sync"
+          data-module-code="visit"
+        >
+          立即同步
+        </button>
+        <a class="module-entry-link" href="/console">返回模块总览</a>
       </div>
     </div>
-    <div class="inline-actions">
-      <button
-        class="action-button"
-        data-action="sync"
-        data-module-code="visit"
-      >
-        立即同步
-      </button>
-      <button
-        class="action-button secondary"
-        data-action="rerun-sync"
-        data-module-code="visit"
-      >
-        重跑同步
-      </button>
-      <a class="module-entry-link" href="/console">返回模块总览</a>
-      <a class="module-entry-link" href="/console/tasks?module_code=visit">查看全部 visit 任务</a>
+    <div class="visit-owner-filter">
+      <label for="visit-owner-filter">回访人筛选</label>
+      <div class="visit-owner-filter-main">
+        <input
+          id="visit-owner-filter"
+          class="visit-owner-input"
+          list="visit-owner-options"
+          type="text"
+          placeholder="输入回访人姓名，留空或输入"全部"表示不过滤"
+          value="{{ selected_visit_owner }}"
+        />
+        <datalist id="visit-owner-options">
+          <option value="全部"></option>
+        </datalist>
+      </div>
     </div>
-  </div>
-</section>
-
-<section class="section">
-  <div class="panel">
-    <div class="section-head">
-      <h4>模块健康检查</h4>
-      <span id="visit-health-badge" class="badge status-unknown">加载中</span>
-    </div>
-    <p id="visit-health-summary" class="muted">正在检查本模块健康状态...</p>
-    <ul id="visit-health-list" class="health-check-list">
-      <li class="muted">加载中...</li>
-    </ul>
-    <p id="visit-health-error" class="muted" hidden></p>
-    <button id="visit-health-retry" class="action-button secondary" type="button" hidden>重试健康检查</button>
-  </div>
-</section>
-
-<section class="section">
-  <div class="panel">
-    <div class="section-head">
-      <h4>模块状态</h4>
-      <span id="visit-summary-sync-badge" class="badge status-unknown">加载中</span>
-    </div>
-    <p id="visit-summary-meta" class="muted">数据时间：加载中...</p>
     <dl class="stats" id="visit-summary-stats">
       <div><dt>最近同步</dt><dd>加载中</dd></div>
       <div><dt>最近执行</dt><dd>加载中</dd></div>
@@ -80,7 +48,7 @@
     </dl>
     <p id="visit-summary-error" class="muted" hidden></p>
     <button id="visit-summary-retry" class="action-button secondary" type="button" hidden>重试加载模块状态</button>
-  </div>
+  </article>
 </section>
 
 <section class="section">
@@ -88,7 +56,6 @@
     <div class="section-head">
       <div>
         <h4>待执行回访任务</h4>
-        <p class="muted">按所选回访人展示待执行任务；点击后任务会进入后台队列异步执行，页面会自动轮询执行进度。</p>
       </div>
       <button
         id="visit-execute-all-btn"
@@ -101,8 +68,7 @@
         一键创建并闭环全部（后台执行 0）
       </button>
     </div>
-    <p id="visit-pending-meta" class="muted">数据时间：加载中...</p>
-    <div>
+        <div>
       <dl class="stats" id="visit-auto-execute-stats">
         <div><dt>18:00自动执行（全量）</dt><dd>加载中</dd></div>
         <div><dt>不会自动执行</dt><dd>加载中</dd></div>
@@ -143,14 +109,9 @@
 <section class="section">
   <div class="panel">
     <div class="section-head">
-      <div>
         <h4>最近闭环回访链接</h4>
-        <p class="muted">闭环成功后，可以直接在这里复制回访链接。</p>
-      </div>
-      <a class="module-entry-link" href="/console/visit-links">查看全部闭环回访链接</a>
     </div>
-    <p id="visit-recent-meta" class="muted">数据时间：加载中...</p>
-    <div id="visit-recent-section">
+        <div id="visit-recent-section">
     <table class="data-table compact-table" id="visit-recent-table">
       <thead>
         <tr>

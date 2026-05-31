@@ -9,10 +9,6 @@ from urllib.parse import urljoin
 import httpx
 
 from core.config import get_settings
-from services.collectors.dingtalk_browser_auth import (
-    DingtalkBrowserAuthError,
-    resolve_dingtalk_browser_auth,
-)
 from services.collectors.dingtalk_parallelv2_decoder import (
     decode_parallelv2_bytes,
     parse_document_data_structure,
@@ -448,14 +444,13 @@ class DingtalkPayloadFetcher:
 
     def _build_request(self, config: ModuleSourceConfig, *, step: str, endpoint: str) -> dict[str, Any]:
         url = endpoint if endpoint.startswith("http://") or endpoint.startswith("https://") else urljoin(config.source_url, endpoint)
-        browser_auth = self._resolve_browser_auth(config=config, endpoint=url)
         method = str(config.get_extra(f"{step}_method", "GET")).upper()
         params = config.get_extra(f"{step}_query_params", {})
         json_body = config.get_extra(f"{step}_json_body")
-        headers = self._build_headers(config, step=step, browser_auth=browser_auth)
+        headers = self._build_headers(config, step=step)
         headers.setdefault("Cache-Control", "no-cache")
         headers.setdefault("Pragma", "no-cache")
-        cookies = self._build_cookies(config, browser_auth=browser_auth)
+        cookies = self._build_cookies(config)
         timeout = float(config.get_extra("request_timeout_seconds", self.settings.dingtalk_request_timeout_seconds))
         verify_ssl = bool(config.get_extra("verify_ssl", self.settings.dingtalk_verify_ssl))
         request_params = dict(params) if isinstance(params, dict) else {}
@@ -469,12 +464,6 @@ class DingtalkPayloadFetcher:
             "cookies": cookies,
             "timeout": timeout,
             "verify_ssl": verify_ssl,
-            "auth_meta": {
-                "auth_source": browser_auth.get("auth_source") if isinstance(browser_auth, dict) else None,
-                "cookie_count": len(browser_auth.get("cookies", {})) if isinstance(browser_auth, dict) else 0,
-                "matched_hosts": browser_auth.get("matched_hosts", []) if isinstance(browser_auth, dict) else [],
-                "browser_auth_error": browser_auth.get("error") if isinstance(browser_auth, dict) else None,
-            },
         }
 
     @staticmethod
@@ -532,7 +521,7 @@ class DingtalkPayloadFetcher:
             )
         return response
 
-    def _build_headers(self, config: ModuleSourceConfig, *, step: str, browser_auth: dict[str, Any] | None = None) -> dict[str, str]:
+    def _build_headers(self, config: ModuleSourceConfig, *, step: str) -> dict[str, str]:
         headers: dict[str, str] = {}
         headers.update({str(k): str(v) for k, v in _parse_json_mapping(self.settings.dingtalk_default_headers_json, label="DINGTALK_DEFAULT_HEADERS_JSON").items()})
 
@@ -560,12 +549,9 @@ class DingtalkPayloadFetcher:
             prefix = str(config.get_extra("token_prefix", default_prefix))
             headers[header_name] = f"{prefix}{token_env_value}" if prefix else token_env_value
 
-        if isinstance(browser_auth, dict):
-            headers.update({str(k): str(v) for k, v in (browser_auth.get("headers") or {}).items()})
-
         return headers
 
-    def _build_cookies(self, config: ModuleSourceConfig, browser_auth: dict[str, Any] | None = None) -> dict[str, str]:
+    def _build_cookies(self, config: ModuleSourceConfig) -> dict[str, str]:
         cookies: dict[str, str] = {}
         cookies.update({str(k): str(v) for k, v in _parse_json_mapping(self.settings.dingtalk_default_cookies_json, label="DINGTALK_DEFAULT_COOKIES_JSON").items()})
         static_cookies = config.get_extra("static_cookies", {})
@@ -582,24 +568,7 @@ class DingtalkPayloadFetcher:
                 cookies.update({str(k): str(v) for k, v in _parse_json_mapping(cookies_env_value, label="cookies_env").items()})
             else:
                 cookies.update(_parse_cookie_string(cookies_env_value))
-        if isinstance(browser_auth, dict):
-            cookies.update({str(k): str(v) for k, v in (browser_auth.get("cookies") or {}).items()})
         return cookies
-
-    def _resolve_browser_auth(self, *, config: ModuleSourceConfig, endpoint: str) -> dict[str, Any] | None:
-        if not self.settings.dingtalk_browser_auth_enabled:
-            return {"auth_source": "disabled", "cookies": {}, "headers": {}, "matched_hosts": []}
-        target_url = endpoint if endpoint.startswith("http://") or endpoint.startswith("https://") else config.source_url
-        try:
-            return resolve_dingtalk_browser_auth(source_url=target_url)
-        except DingtalkBrowserAuthError as exc:
-            return {
-                "auth_source": "static_config_fallback",
-                "cookies": {},
-                "headers": {},
-                "matched_hosts": [],
-                "error": str(exc),
-            }
 
     @staticmethod
     def _use_parallelv2_binary_mode(config: ModuleSourceConfig) -> bool:
@@ -653,6 +622,9 @@ def build_fetcher(config: ModuleSourceConfig) -> CollectorFetcher:
         return FakePayloadFetcher()
     if config.collector_type == "fixture":
         return FixturePayloadFetcher()
+    if config.collector_type == "dws_cli":
+        from services.collectors.dws_cli_fetcher import DwsCliPayloadFetcher
+        return DwsCliPayloadFetcher()
     if config.collector_type in {"dingtalk", "real"}:
         return DingtalkPayloadFetcher()
     raise ValueError(f"unsupported collector_type: {config.collector_type}")

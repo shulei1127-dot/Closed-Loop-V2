@@ -72,8 +72,8 @@ class OpsService:
         self.record_repo = NormalizedRecordRepository(db)
         self.task_repo = TaskPlanRepository(db)
         self.task_run_repo = TaskRunRepository(db)
-        self.inspection_report_scanner = InspectionReportScanner(self.settings.inspection_report_root)
-        self.inspection_report_matcher = InspectionReportMatcher(required_file_types=("word",))
+        self.inspection_report_scanner = None
+        self.inspection_report_matcher = None
         self._inspection_report_files_cache = None
         self._inspection_report_match_cache: dict[str, object] = {}
         self._pending_task_groups_cache: dict[
@@ -353,8 +353,8 @@ class OpsService:
                     module_code=summary.module_code,
                     module_name=summary.module_name,
                     latest_snapshot_time=summary.latest_snapshot_time,
-                    latest_sync_status=summary.sync_status,
-                    latest_sync_status_label=status_label(summary.sync_status),
+                    latest_sync_status=None if summary.sync_status == "partial" else summary.sync_status,
+                    latest_sync_status_label=None if summary.sync_status == "partial" else status_label(summary.sync_status),
                     latest_execute_status=latest_execute_status,
                     latest_execute_status_label=status_label(latest_execute_status),
                     latest_execute_explanation=latest_execute_explanation,

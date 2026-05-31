@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import tempfile
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -105,12 +104,6 @@ class VisitDeliveryIdBackfill:
             return delivery_id, "pts_project_page", raw_value
         auth_required = raw_value == "__auth_required__"
 
-        delivery_id, raw_value = await self._fetch_with_local_chrome_profile(pts_link=pts_link)
-        if delivery_id:
-            return delivery_id, "pts_chrome_profile", raw_value
-        if raw_value == "__auth_required__":
-            auth_required = True
-
         delivery_id, raw_value = await self._fetch_with_playwright(pts_link=pts_link)
         if delivery_id:
             return delivery_id, "pts_playwright", raw_value
@@ -184,59 +177,6 @@ class VisitDeliveryIdBackfill:
             return None, None
         return None, None
 
-    async def _fetch_with_local_chrome_profile(self, *, pts_link: str) -> tuple[str | None, str | None]:
-        profile_root = _find_local_chrome_user_data_dir()
-        if profile_root is None:
-            return None, None
-
-        temp_user_data_dir = Path(tempfile.mkdtemp(prefix="pts-chrome-profile-"))
-        try:
-            if not _copy_chrome_profile(profile_root, temp_user_data_dir):
-                return None, None
-
-            try:
-                from playwright.async_api import async_playwright
-            except ImportError:
-                return None, None
-
-            responses: list[Any] = []
-            async with async_playwright() as playwright:
-                context = await playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(temp_user_data_dir),
-                    channel="chrome",
-                    headless=True,
-                    args=["--profile-directory=Default"],
-                    ignore_https_errors=not self.settings.pts_verify_ssl,
-                )
-                page = await context.new_page()
-                page.on("response", lambda response: responses.append(response))
-                await page.goto(strip_url_fragment(pts_link), wait_until="domcontentloaded", timeout=45000)
-                await page.wait_for_timeout(3000)
-                if "auth.chaitin.net/login" in page.url:
-                    await context.close()
-                    return None, "__auth_required__"
-
-                html = await page.content()
-                delivery_id, raw_value = extract_delivery_id_from_text(html)
-                if delivery_id:
-                    await context.close()
-                    return delivery_id, raw_value
-
-                for response in responses:
-                    try:
-                        body = await response.text()
-                    except Exception:
-                        continue
-                    delivery_id, raw_value = extract_delivery_id_from_text(body)
-                    if delivery_id:
-                        await context.close()
-                        return delivery_id, raw_value
-                await context.close()
-        except Exception:
-            return None, None
-        finally:
-            shutil.rmtree(temp_user_data_dir, ignore_errors=True)
-        return None, None
 
     @staticmethod
     def _populate_debug_defaults(data: dict[str, Any]) -> None:
@@ -313,50 +253,3 @@ def _build_playwright_cookies(cookie_header: str, base_url: str) -> list[dict[st
             }
         )
     return cookies
-
-
-def _find_local_chrome_user_data_dir() -> Path | None:
-    candidate = Path.home() / "Library/Application Support/Google/Chrome"
-    local_state = candidate / "Local State"
-    default_profile = candidate / "Default"
-    if local_state.exists() and default_profile.exists():
-        return candidate
-    return None
-
-
-def _copy_chrome_profile(source_root: Path, target_root: Path) -> bool:
-    local_state = source_root / "Local State"
-    default_profile = source_root / "Default"
-    if not local_state.exists() or not default_profile.exists():
-        return False
-
-    shutil.copy2(local_state, target_root / "Local State")
-    target_profile = target_root / "Default"
-    target_profile.mkdir(parents=True, exist_ok=True)
-
-    for relative_name in [
-        "Cookies",
-        "Preferences",
-        "Web Data",
-        "Login Data",
-        "History",
-    ]:
-        source_path = default_profile / relative_name
-        if source_path.exists() and source_path.is_file():
-            shutil.copy2(source_path, target_profile / relative_name)
-
-    for relative_dir in [
-        "Local Storage",
-        "Session Storage",
-        "IndexedDB",
-        "Network",
-    ]:
-        source_path = default_profile / relative_dir
-        if source_path.exists() and source_path.is_dir():
-            shutil.copytree(
-                source_path,
-                target_profile / relative_dir,
-                dirs_exist_ok=True,
-                ignore=shutil.ignore_patterns("Cache", "Code Cache", "GPUCache"),
-            )
-    return True

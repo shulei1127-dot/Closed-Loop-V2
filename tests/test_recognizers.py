@@ -9,10 +9,6 @@ from services.planners.inspection_planner import InspectionPlanner
 from services.planners.proactive_planner import ProactivePlanner
 from services.planners.visit_planner import VisitPlanner
 from services.recognizers.inspection_recognizer import InspectionRecognizer
-from services.recognizers.inspection_work_order_backfill import (
-    InspectionWorkOrderStageBackfill,
-    extract_inspection_stage_from_text,
-)
 from services.recognizers.proactive_recognizer import ProactiveRecognizer
 from services.recognizers.visit_recognizer import VisitRecognizer
 
@@ -152,45 +148,6 @@ def test_inspection_real_rows_field_recognition() -> None:
     assert normalized["work_order_closed"] is False
     assert normalized["remark"] == "巡检备注测试"
     assert result.recognition_status == "full"
-
-
-def test_extract_inspection_stage_from_text_prefers_review_completion() -> None:
-    stage, raw = extract_inspection_stage_from_text(
-        "开始处理工单 舒磊 完成工单处理 舒磊 完成工单审核 李升明"
-    )
-    assert stage == "审核工单"
-    assert raw == "完成工单审核"
-
-
-def test_inspection_work_order_backfill_marks_review_stage_closed() -> None:
-    async def fake_stage_reader(link: str) -> tuple[str | None, str, str | None]:
-        assert link == "https://pts.example.com/project/order/1"
-        return "审核工单", "pts_browser_session", "完成工单审核"
-
-    enricher = InspectionWorkOrderStageBackfill(stage_reader=fake_stage_reader)
-    records = [
-        {
-            "source_row_id": "inspection-stage-001",
-            "recognition_status": "full",
-            "normalized_data": {
-                "customer_name": "昆明客户",
-                "service_type": "巡检服务",
-                "executor_name": "舒磊",
-                "inspection_done": True,
-                "work_order_closed": False,
-                "work_order_link": "https://pts.example.com/project/order/1",
-            },
-        }
-    ]
-
-    enriched = asyncio.run(enricher.enrich_records(records))
-    normalized = enriched[0]["normalized_data"]
-
-    assert normalized["work_order_stage"] == "审核工单"
-    assert normalized["work_order_closed"] is True
-    assert normalized["debug_work_order_stage_source"] == "pts_browser_session"
-    assert normalized["debug_work_order_stage_raw"] == "完成工单审核"
-    assert normalized["debug_work_order_stage_normalized"] == "审核工单"
 
 
 def test_proactive_real_rows_field_recognition() -> None:

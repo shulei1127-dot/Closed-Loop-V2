@@ -19,20 +19,32 @@ class PtsSessionService:
         self.env_path = env_path or DEFAULT_ENV_PATH
 
     def get_status(self) -> dict:
-        values = self._read_env_values()
         settings = get_settings()
+        api_token_configured = bool(settings.pts_api_token)
         browser_profile_enabled = pts_browser_profile_enabled(settings)
         browser_profile_dir = resolve_pts_profile_dir(settings)
         browser_profile_configured = pts_browser_profile_configured(settings)
+        cookie_configured = bool(settings.pts_cookie_header)
         updated_at = None
         if self.env_path.exists():
             updated_at = datetime.fromtimestamp(self.env_path.stat().st_mtime).isoformat()
-        cookie_configured = bool(values.get("PTS_COOKIE_HEADER"))
+        # Determine effective auth source
+        if api_token_configured:
+            source = "api_token"
+        elif browser_profile_configured:
+            source = "browser_profile"
+        elif cookie_configured:
+            source = "cookie"
+        else:
+            source = "unconfigured"
+        configured = api_token_configured or browser_profile_configured or cookie_configured
         return {
-            "configured": cookie_configured or browser_profile_configured,
-            "base_url": values.get("PTS_BASE_URL") or settings.pts_base_url,
-            "source": values.get("PTS_AUTH_SOURCE") or ("browser_profile" if browser_profile_configured else "env_file"),
+            "configured": configured,
+            "base_url": settings.pts_base_url or "https://pts.chaitin.net",
+            "api_base_url": settings.pts_api_base_url or "http://api.in.chaitin.net",
+            "source": source,
             "updated_at": updated_at,
+            "api_token_configured": api_token_configured,
             "cookie_configured": cookie_configured,
             "browser_profile_enabled": browser_profile_enabled,
             "browser_profile_configured": browser_profile_configured,
@@ -41,6 +53,26 @@ class PtsSessionService:
 
     def update_cookie(self, cookie_header: str) -> dict:
         return self.update_auth_bundle(cookie_header=cookie_header, source="manual_input")
+
+    def update_api_token(self, api_token: str) -> dict:
+        token = api_token.strip()
+        if not token:
+            raise ValueError("PTS API Token 不能为空")
+        if "\n" in token or "\r" in token:
+            raise ValueError("PTS API Token 格式非法")
+
+        lines: list[str] = []
+        if self.env_path.exists():
+            lines = self.env_path.read_text(encoding="utf-8").splitlines()
+
+        lines = self._upsert_env_line(lines, "PTS_API_TOKEN", token)
+        lines = self._upsert_env_line(lines, "PTS_AUTH_SOURCE", "api_token")
+
+        self.env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        get_settings.cache_clear()
+        status = self.get_status()
+        status["message"] = "PTS API Token 已更新"
+        return status
 
     def update_auth_bundle(
         self,

@@ -162,8 +162,10 @@ async def enqueue_pending_tasks(
         month=request.month,
         visit_owner=request.visit_owner if request.module_code in {"visit", "proactive"} else None,
     )
-    if request.module_code in {"inspection", "visit"}:
+    if request.module_code == "visit":
         pending_items = [item for item in pending_items if item.can_execute]
+    if request.task_types:
+        pending_items = [item for item in pending_items if item.task_type in request.task_types]
     task_ids = [item.task_plan_id for item in pending_items]
     enqueue_result = await dispatcher.enqueue_tasks(
         module_code=request.module_code,
@@ -201,8 +203,10 @@ async def execute_pending_tasks(
         month=request.month,
         visit_owner=request.visit_owner if request.module_code in {"visit", "proactive"} else None,
     )
-    if request.module_code in {"inspection", "visit"}:
+    if request.module_code == "visit":
         pending_items = [item for item in pending_items if item.can_execute]
+    if request.task_types:
+        pending_items = [item for item in pending_items if item.task_type in request.task_types]
     task_ids = [uuid.UUID(item.task_plan_id) for item in pending_items]
 
     results = []

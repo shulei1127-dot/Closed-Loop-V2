@@ -41,7 +41,7 @@ class ConfiguredCollectorBase:
             raise ValueError(f"{self.module_label} missing source_url")
         if not self.config.source_doc_key:
             raise ValueError(f"{self.module_label} missing source_doc_key")
-        if self.config.collector_type not in {"fake", "fixture", "dingtalk", "real"}:
+        if self.config.collector_type not in {"fake", "fixture", "dingtalk", "real", "dws_cli"}:
             raise ValueError(f"{self.module_label} unsupported collector_type={self.config.collector_type}")
         if self.config.collector_type == "fake":
             has_payload = any(
@@ -84,6 +84,11 @@ class ConfiguredCollectorBase:
                     f"{self.module_label} real transport requires structured_endpoint, state_endpoint, "
                     "or direct parallelv2 configuration"
                 )
+        if self.config.collector_type == "dws_cli":
+            has_base_id = bool(self.config.get_extra("dws_cli_base_id"))
+            has_table_id = bool(self.config.get_extra("dws_cli_table_id"))
+            if not has_base_id or not has_table_id:
+                raise ValueError(f"{self.module_label} dws_cli requires dws_cli_base_id and dws_cli_table_id")
 
     def healthcheck(self) -> dict[str, Any]:
         return {
@@ -100,6 +105,7 @@ class ConfiguredCollectorBase:
                 self.config.has_inline_payload("structured_payload")
                 or self.config.resolve_path("structured_payload_path")
                 or self.config.get_extra("structured_endpoint")
+                or (self.config.collector_type == "dws_cli" and self.config.get_extra("dws_cli_base_id") and self.config.get_extra("dws_cli_table_id"))
             ),
             "state_configured": bool(
                 self.config.has_inline_payload("state_payload")

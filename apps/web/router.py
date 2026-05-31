@@ -12,10 +12,9 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from core.db import get_db
-from repositories.normalized_record_repo import NormalizedRecordRepository
-from repositories.source_snapshot_repo import SourceSnapshotRepository
 from repositories.task_plan_repo import TaskPlanRepository
 from repositories.task_run_repo import TaskRunRepository
+from repositories.normalized_record_repo import NormalizedRecordRepository
 from services.ops_copy import build_run_view
 from services.ops_service import OpsService
 from services.pts_session_service import PtsSessionService
@@ -57,20 +56,15 @@ def root() -> RedirectResponse:
 @router.get("/console", response_class=HTMLResponse)
 def console_dashboard(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     pts_session_status = PtsSessionService().get_status()
-    inspection_month = request.query_params.get("inspection_month") or datetime.now(LOCAL_TZ).strftime("%Y-%m")
     return templates.TemplateResponse(
         name="console/dashboard.html",
         request=request,
         context={
-            "page_title": "模块总览",
+            "page_title": "",
             "module_summaries": [],
             "failure_items": [],
             "manual_required_items": [],
             "pending_visit_items": [],
-            "pending_inspection_items": [],
-            "inspection_month": inspection_month,
-            "available_inspection_months": [inspection_month],
-            "recent_inspection_closures": [],
             "recent_visit_links": [],
             "pts_session_status": pts_session_status,
             "defer_dashboard_data": True,
@@ -101,26 +95,6 @@ def console_visit_module(request: Request, db: Session = Depends(get_db)) -> HTM
     )
 
 
-@router.get("/console/modules/inspection", response_class=HTMLResponse)
-def console_inspection_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
-    inspection_month = request.query_params.get("inspection_month") or datetime.now(LOCAL_TZ).strftime("%Y-%m")
-    return templates.TemplateResponse(
-        name="console/module_inspection.html",
-        request=request,
-        context={
-            "page_title": "巡检工单闭环",
-            "module_summary": None,
-            "pending_inspection_items": [],
-            "inspection_month": inspection_month,
-            "available_inspection_months": [inspection_month],
-            "available_sync_months": [inspection_month],
-            "recent_inspection_closures": [],
-            "defer_module_data": True,
-            "active_nav": "module_inspection",
-        },
-    )
-
-
 @router.get("/console/modules/proactive", response_class=HTMLResponse)
 def console_proactive_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     selected_visit_owner = (request.query_params.get("visit_owner") or "").strip()
@@ -139,60 +113,17 @@ def console_proactive_module(request: Request, db: Session = Depends(get_db)) ->
     )
 
 
-@router.get("/console/visit-links", response_class=HTMLResponse)
-def console_visit_links(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
-    ops_service = OpsService(db)
+@router.get("/console/modules/review", response_class=HTMLResponse)
+def console_review_module(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
     return templates.TemplateResponse(
-        name="console/visit_links.html",
+        name="console/module_review.html",
         request=request,
         context={
-            "page_title": "闭环回访链接",
-            "visit_link_items": [item.model_dump() for item in ops_service.list_recent_visit_links(limit=None)],
-            "active_nav": "dashboard",
-        },
-    )
-
-
-@router.get("/console/inspection-links", response_class=HTMLResponse)
-def console_inspection_links(request: Request, db: Session = Depends(get_db)) -> HTMLResponse:
-    ops_service = OpsService(db)
-    inspection_month = request.query_params.get("inspection_month") or datetime.now(LOCAL_TZ).strftime("%Y-%m")
-    return templates.TemplateResponse(
-        name="console/inspection_links.html",
-        request=request,
-        context={
-            "page_title": "全部巡检闭环记录",
-            "inspection_month": inspection_month,
-            "inspection_link_items": [
-                item.model_dump()
-                for item in ops_service.list_recent_inspection_closures(month=inspection_month, limit=None)
-            ],
-            "active_nav": "module_inspection",
-        },
-    )
-
-
-@router.get("/console/snapshots", response_class=HTMLResponse)
-def console_snapshots(
-    request: Request,
-    module_code: str | None = Query(default=None),
-    snapshot_id: uuid.UUID | None = Query(default=None),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    repo = SourceSnapshotRepository(db)
-    service = SyncService(db)
-    snapshots = repo.list_recent(module_code=module_code, limit=50)
-    selected_snapshot = service.get_snapshot_detail(snapshot_id) if snapshot_id else None
-    return templates.TemplateResponse(
-        name="console/snapshots.html",
-        request=request,
-        context={
-            "page_title": "快照",
-            "snapshots": snapshots,
-            "selected_snapshot": selected_snapshot,
-            "selected_snapshot_id": str(snapshot_id) if snapshot_id else None,
-            "module_code": module_code,
-            "active_nav": "snapshots",
+            "page_title": "交付转售后审核",
+            "module_summary": None,
+            "pending_review_items": [],
+            "defer_module_data": True,
+            "active_nav": "module_review",
         },
     )
 
@@ -257,6 +188,12 @@ def console_tasks(
     selected_runs = task_run_repo.list_by_task_plan(str(task_id)) if task_id else []
     failure_items = [item.model_dump() for item in ops_service.list_failures(limit=10)]
     manual_required_items = [item.model_dump() for item in ops_service.list_manual_required(limit=10)]
+
+    now = datetime.now(LOCAL_TZ)
+    available_months = []
+    for i in range(13):
+        m = now.year * 12 + now.month - 1 - i
+        available_months.append(f"{m // 12:04d}-{m % 12 + 1:02d}")
     selected_run_views = []
     if task_id:
         record = record_repo.get_by_id(selected_task.normalized_record_id) if selected_task else None
@@ -296,6 +233,7 @@ def console_tasks(
             "month": month,
             "failure_items": failure_items,
             "manual_required_items": manual_required_items,
+            "available_months": available_months,
             "active_nav": "tasks",
         },
     )
@@ -314,7 +252,9 @@ def console_task_run_detail(
     ops_service = OpsService(db)
     task_plan = task_repo.get_by_id(uuid.UUID(task_run.task_plan_id))
     customer_name = None
+    module_code = None
     if task_plan is not None:
+        module_code = task_plan.module_code
         record = record_repo.get_by_id(task_plan.normalized_record_id)
         customer_name = (
             getattr(record, "customer_name", None)
@@ -330,6 +270,7 @@ def console_task_run_detail(
         task_plan_id=task_run.task_plan_id,
         task_run_id=task_run.task_run_id,
     )
+    back_url = f"/console/modules/{module_code}" if module_code else "/console"
     return templates.TemplateResponse(
         name="console/task_run_detail.html",
         request=request,
@@ -337,33 +278,7 @@ def console_task_run_detail(
             "page_title": "执行结果",
             "task_run": task_run,
             "task_run_view": task_run_view,
-            "active_nav": "tasks",
-        },
-    )
-
-
-@router.get("/console/records", response_class=HTMLResponse)
-def console_records(
-    request: Request,
-    module_code: str | None = Query(default=None),
-    snapshot_id: str | None = Query(default=None),
-    record_id: uuid.UUID | None = Query(default=None),
-    db: Session = Depends(get_db),
-) -> HTMLResponse:
-    repo = NormalizedRecordRepository(db)
-    service = SyncService(db)
-    records = repo.list_by_filters(module_code=module_code, snapshot_id=snapshot_id)
-    selected_record = service.get_record_detail(record_id) if record_id else None
-    return templates.TemplateResponse(
-        name="console/records.html",
-        request=request,
-        context={
-            "page_title": "标准化记录",
-            "records": records,
-            "selected_record": selected_record,
-            "selected_record_id": str(record_id) if record_id else None,
-            "module_code": module_code,
-            "snapshot_id": snapshot_id,
-            "active_nav": "records",
+            "back_url": back_url,
+            "active_nav": f"module_{module_code}" if module_code else "dashboard",
         },
     )

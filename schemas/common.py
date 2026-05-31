@@ -21,37 +21,6 @@ class EnvironmentCheckResponse(BaseModel):
     task_dispatcher: dict[str, Any] = Field(default_factory=dict)
 
 
-class ModuleHealthCheckItem(BaseModel):
-    code: str
-    label: str
-    status: str
-    status_label: str
-    detail: str | None = None
-
-
-class ModuleHealthItem(BaseModel):
-    module_code: str
-    module_name: str
-    status: str
-    status_label: str
-    summary: str
-    last_snapshot_time: datetime | None = None
-    last_sync_status: str | None = None
-    checks: list[ModuleHealthCheckItem] = Field(default_factory=list)
-
-
-class ModuleHealthListResponse(BaseModel):
-    ok: bool = True
-    items: list[ModuleHealthItem] = Field(default_factory=list)
-    served_at: datetime
-
-
-class ModuleHealthDetailResponse(BaseModel):
-    ok: bool = True
-    item: ModuleHealthItem | None = None
-    served_at: datetime
-
-
 class SnapshotItem(BaseModel):
     snapshot_id: str
     module_code: str

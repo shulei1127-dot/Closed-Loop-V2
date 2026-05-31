@@ -75,14 +75,6 @@ async function pollBatchStatus(batchId, options = {}) {
   await tick();
 }
 
-function getInspectionSyncMonths() {
-  const select = document.getElementById("inspection-sync-months");
-  if (!select) return [];
-  return Array.from(select.selectedOptions || [])
-    .map((option) => option.value.trim())
-    .filter(Boolean);
-}
-
 function getVisitOwnerFilter() {
   const select = document.getElementById("visit-owner-filter");
   if (!select) return "";
@@ -117,8 +109,6 @@ function shouldPrefetchLink(link) {
       url.pathname === "/console"
       || url.pathname.startsWith("/console/modules/")
       || url.pathname.startsWith("/console/tasks")
-      || url.pathname.startsWith("/console/inspection-links")
-      || url.pathname.startsWith("/console/visit-links")
     );
   } catch {
     return false;
@@ -169,6 +159,11 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function truncate(value, maxLen = 120) {
+  const s = String(value || "");
+  return s.length > maxLen ? s.substring(0, maxLen) + "…" : s;
+}
+
 function renderDataMeta(targetId, meta) {
   const el = document.getElementById(targetId);
   if (!el) return;
@@ -181,78 +176,6 @@ function renderDataMeta(targetId, meta) {
   el.textContent = `数据时间：${servedAt}（${source}）`;
 }
 
-function renderModuleHealthPanel(prefix, item) {
-  const badge = document.getElementById(`${prefix}-health-badge`);
-  const summary = document.getElementById(`${prefix}-health-summary`);
-  const list = document.getElementById(`${prefix}-health-list`);
-  if (badge) {
-    badge.className = `badge status-${item?.status || "unknown"}`;
-    badge.textContent = item?.status_label || "未知";
-  }
-  if (summary) {
-    summary.textContent = item?.summary || "暂无健康检查摘要";
-  }
-  if (list) {
-    const checks = item?.checks || [];
-    if (!checks.length) {
-      list.innerHTML = '<li class="muted">暂无健康检查项。</li>';
-    } else {
-      list.innerHTML = checks
-        .map((check) => `
-          <li>
-            <strong>${escapeHtml(check.label || check.code || "检查项")}</strong>
-            <span class="badge status-${escapeHtml(check.status || "unknown")}">${escapeHtml(check.status_label || "未知")}</span>
-            <span class="muted">${escapeHtml(check.detail || "")}</span>
-          </li>
-        `)
-        .join("");
-    }
-  }
-}
-
-function renderDashboardHealth(items) {
-  const badge = document.getElementById("dashboard-health-badge");
-  const summary = document.getElementById("dashboard-health-summary");
-  const grid = document.getElementById("dashboard-health-grid");
-  if (!badge || !summary || !grid) return;
-  const statuses = new Set((items || []).map((item) => item.status || "unknown"));
-  let overall = "ok";
-  let label = "健康";
-  if (statuses.has("failed")) {
-    overall = "failed";
-    label = "异常";
-  } else if (statuses.has("warning")) {
-    overall = "warning";
-    label = "关注";
-  }
-  badge.className = `badge status-${overall}`;
-  badge.textContent = label;
-  summary.textContent = `共 ${items.length || 0} 个模块，展示同步/执行/会话/目录等关键检查项。`;
-  if (!items.length) {
-    grid.innerHTML = '<article class="health-card"><p class="muted">暂无模块健康信息。</p></article>';
-    return;
-  }
-  grid.innerHTML = items
-    .map((item) => `
-      <article class="health-card">
-        <div class="section-head">
-          <h4>${escapeHtml(item.module_name || item.module_code || "模块")}</h4>
-          <span class="badge status-${escapeHtml(item.status || "unknown")}">${escapeHtml(item.status_label || "未知")}</span>
-        </div>
-        <p class="muted">${escapeHtml(item.summary || "-")}</p>
-        <ul class="health-check-list">
-          ${(item.checks || []).map((check) => `
-            <li>
-              <strong>${escapeHtml(check.label || check.code || "检查项")}</strong>
-              <span class="badge status-${escapeHtml(check.status || "unknown")}">${escapeHtml(check.status_label || "未知")}</span>
-              <span class="muted">${escapeHtml(check.detail || "")}</span>
-            </li>
-          `).join("")}
-        </ul>
-      </article>
-    `)
-    .join("");
-}
 
 async function loadSection({ sectionName, loader, onSuccess, errorId, retryId }) {
   try {
@@ -364,8 +287,8 @@ async function loadVisitModuleData(meta) {
           </td>
           <td>${escapeHtml(item.latest_run_time ? fmtDateTime(item.latest_run_time) : "未执行")}</td>
           <td>
-            <div>${escapeHtml(item.business_explanation || "-")}</div>
-            <div class="technical-hint">${escapeHtml(item.technical_detail || "")}</div>
+            <div title="${escapeHtml(item.business_explanation || "-")}">${escapeHtml(truncate(item.business_explanation || "-"))}</div>
+            <div class="technical-hint" title="${escapeHtml(item.technical_detail || "")}">${escapeHtml(truncate(item.technical_detail || "", 80))}</div>
           </td>
           <td>
             <a href="${escapeHtml(item.detail_url || "#")}">查看任务</a>
@@ -426,8 +349,13 @@ async function loadVisitModuleData(meta) {
     const item = visitState.summaryItem || {};
     const badge = document.getElementById("visit-summary-sync-badge");
     if (badge) {
-      badge.className = `badge status-${item.latest_sync_status || "unknown"}`;
-      badge.textContent = item.latest_sync_status_label || "未同步";
+      if (item.latest_sync_status) {
+        badge.className = `badge status-${item.latest_sync_status}`;
+        badge.textContent = item.latest_sync_status_label;
+        badge.style.display = "";
+      } else {
+        badge.style.display = "none";
+      }
     }
     const filtered = visitState.filteredCount == null ? "加载中" : String(visitState.filteredCount);
     const total = visitState.totalCount == null ? "加载中" : String(visitState.totalCount);
@@ -452,18 +380,8 @@ async function loadVisitModuleData(meta) {
   };
   const loadRecent = () => getJson("/api/ops/modules/visit/recent/visit?limit=100");
   const loadOwners = () => getJson("/api/ops/modules/visit/owners");
-  const loadHealth = () => getJson("/health/modules/visit");
 
   await Promise.allSettled([
-    loadSection({
-      sectionName: "模块健康检查",
-      loader: loadHealth,
-      errorId: "visit-health-error",
-      retryId: "visit-health-retry",
-      onSuccess: (result) => {
-        renderModuleHealthPanel("visit", result.item);
-      },
-    }),
     loadSection({
       sectionName: "模块状态",
       loader: loadSummary,
@@ -484,7 +402,6 @@ async function loadVisitModuleData(meta) {
       errorId: "visit-pending-error",
       retryId: "visit-pending-retry",
       onSuccess: (result) => {
-        renderDataMeta("visit-pending-meta", result.meta);
         const items = result.items || [];
         visitState.pendingItems = items;
         visitState.pendingPage = 1;
@@ -511,7 +428,6 @@ async function loadVisitModuleData(meta) {
       errorId: "visit-recent-error",
       retryId: "visit-recent-retry",
       onSuccess: (result) => {
-        renderDataMeta("visit-recent-meta", result.meta);
         visitState.recentItems = result.items || [];
         visitState.recentPage = 1;
         renderVisitRecent();
@@ -534,7 +450,6 @@ async function loadVisitModuleData(meta) {
   await refreshVisitAutoExecuteStats();
 
   const retryMap = [
-    ["visit-health-retry", () => loadVisitModuleData(meta)],
     ["visit-summary-retry", () => loadVisitModuleData(meta)],
     ["visit-pending-retry", () => loadVisitModuleData(meta)],
     ["visit-recent-retry", () => loadVisitModuleData(meta)],
@@ -588,252 +503,153 @@ async function loadVisitModuleData(meta) {
   }
 }
 
-async function loadInspectionModuleData(meta) {
-  const month = (meta.dataset.inspectionMonth || "").trim();
-  const monthQuery = month ? `?month=${encodeURIComponent(month)}` : "";
-  const inspectionState = {
+async function loadReviewModuleData(meta) {
+  const reviewState = {
     summaryItem: null,
-    pendingCount: null,
     pendingItems: [],
     pendingPage: 1,
     pendingPageSize: 5,
   };
 
-  function renderInspectionPending() {
-    const tbody = document.getElementById("inspection-pending-tbody");
-    if (!tbody) return;
-    const items = inspectionState.pendingItems || [];
-    const pageSize = inspectionState.pendingPageSize || 5;
-    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
-    if (inspectionState.pendingPage > totalPages) {
-      inspectionState.pendingPage = totalPages;
-    }
-    const currentPage = Math.max(1, inspectionState.pendingPage || 1);
-    const startIndex = (currentPage - 1) * pageSize;
-    const pageItems = items.slice(startIndex, startIndex + pageSize);
-
-    if (!items.length) {
-      tbody.innerHTML = "";
-      setElementVisible("inspection-pending-empty", true);
-      setElementVisible("inspection-pending-pagination", false);
-      return;
-    }
-
-    setElementVisible("inspection-pending-empty", false);
-    setElementVisible("inspection-pending-pagination", true);
-    tbody.innerHTML = pageItems
-      .map((item) => `
-        <tr>
-          <td>${escapeHtml(item.inspection_month || month || "-")}</td>
-          <td>${escapeHtml(item.customer_name || "未知客户")}</td>
-          <td>
-            <span class="badge status-${escapeHtml(item.business_state_tone || item.state_tone || "unknown")}">${escapeHtml(item.business_state_label || item.state_label || "待确认")}</span>
-            <div class="technical-hint">技术态：${escapeHtml(item.technical_state_label || "未执行")}</div>
-          </td>
-          <td>${escapeHtml(item.executor_name || "未识别")}</td>
-          <td>${item.work_order_link ? `<a href="${escapeHtml(item.work_order_link)}" target="_blank" rel="noreferrer">工单链接</a>` : "无"}</td>
-          <td>${escapeHtml(item.report_word_file || "未匹配到 Word 报告")}</td>
-          <td>${escapeHtml(item.latest_run_time ? fmtDateTime(item.latest_run_time) : "未执行")}</td>
-          <td>
-            <div>
-              <a href="${escapeHtml(item.detail_url || "#")}">查看任务</a>
-              <button class="action-button secondary" data-action="preview" data-task-id="${escapeHtml(item.task_plan_id)}">预览执行</button>
-              <button class="action-button danger" data-action="execute" data-task-id="${escapeHtml(item.task_plan_id)}" data-dry-run="false" ${item.can_execute ? "" : "disabled"}>上传报告并闭环</button>
-            </div>
-            <div class="technical-hint">${escapeHtml(item.technical_detail || "")}</div>
-          </td>
-        </tr>
-      `)
-      .join("");
-
-    setElementText("inspection-pending-page-info", `第 ${currentPage} 页 / 共 ${totalPages} 页`);
-    const prevBtn = document.getElementById("inspection-pending-prev");
-    const nextBtn = document.getElementById("inspection-pending-next");
-    if (prevBtn) prevBtn.disabled = currentPage <= 1;
-    if (nextBtn) nextBtn.disabled = currentPage >= totalPages;
-  }
-
-  function renderInspectionSummary() {
-    const item = inspectionState.summaryItem || {};
-    const badge = document.getElementById("inspection-summary-sync-badge");
+  function renderReviewSummary() {
+    const item = reviewState.summaryItem || {};
+    const badge = document.getElementById("review-summary-sync-badge");
     if (badge) {
-      badge.className = `badge status-${item.latest_sync_status || "unknown"}`;
-      badge.textContent = item.latest_sync_status_label || "未同步";
+      if (item.latest_sync_status) {
+        badge.className = `badge status-${item.latest_sync_status}`;
+        badge.textContent = item.latest_sync_status_label;
+        badge.style.display = "";
+      } else {
+        badge.style.display = "none";
+      }
     }
-    const pendingText = inspectionState.pendingCount == null ? "加载中" : String(inspectionState.pendingCount);
-    const stats = document.getElementById("inspection-summary-stats");
+    const passedCount = (item.row_count ?? 0) - (item.planned_tasks ?? 0) - (item.failed_task_count ?? 0) - (item.manual_required_count ?? 0);
+    const stats = document.getElementById("review-summary-stats");
     if (stats) {
       stats.innerHTML = `
         <div><dt>最近同步</dt><dd>${escapeHtml(fmtDateTime(item.latest_snapshot_time))}</dd></div>
         <div><dt>最近执行</dt><dd>${escapeHtml(item.latest_execute_status_label || "暂无")}</dd></div>
-        <div><dt>当月待闭环</dt><dd id="inspection-summary-pending">${escapeHtml(pendingText)}</dd></div>
-        <div><dt>记录数</dt><dd>${escapeHtml(item.row_count ?? 0)}</dd></div>
-        <div><dt>失败任务</dt><dd>${escapeHtml(item.failed_task_count ?? 0)}</dd></div>
+        <div><dt>待审核任务</dt><dd>${escapeHtml(item.planned_tasks ?? 0)}</dd></div>
+        <div><dt>审核通过</dt><dd>${escapeHtml(passedCount)}</dd></div>
+        <div><dt>审核失败</dt><dd>${escapeHtml(item.failed_task_count ?? 0)}</dd></div>
         <div><dt>需人工处理</dt><dd>${escapeHtml(item.manual_required_count ?? 0)}</dd></div>
       `;
     }
   }
 
+  function renderReviewPending() {
+    const tbody = document.getElementById("review-pending-tbody");
+    if (!tbody) return;
+    const items = reviewState.pendingItems || [];
+    const pageSize = reviewState.pendingPageSize || 5;
+    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+    if (reviewState.pendingPage > totalPages) {
+      reviewState.pendingPage = totalPages;
+    }
+    const currentPage = Math.max(1, reviewState.pendingPage || 1);
+    const startIndex = (currentPage - 1) * pageSize;
+    const pageItems = items.slice(startIndex, startIndex + pageSize);
+
+    if (!items.length) {
+      tbody.innerHTML = "";
+      setElementVisible("review-pending-empty", true);
+      setElementVisible("review-pending-pagination", false);
+      return;
+    }
+
+    setElementVisible("review-pending-empty", false);
+    setElementVisible("review-pending-pagination", true);
+    tbody.innerHTML = pageItems
+      .map((item) => {
+        const payload = item.planned_payload || {};
+        return `
+        <tr>
+          <td>${escapeHtml(item.customer_name || payload.customer_name || "未知客户")}</td>
+          <td>${escapeHtml(payload.project_name || "-")}</td>
+          <td>${escapeHtml(payload.delivery_stage || item.visit_type || item.task_type || "-")}</td>
+          <td>${escapeHtml(payload.after_sales_leader || item.visit_owner || "未识别")}</td>
+          <td>${escapeHtml(item.latest_run_time ? fmtDateTime(item.latest_run_time) : "未执行")}</td>
+          <td>
+            <span class="badge status-${escapeHtml(item.business_state_tone || item.state_tone || "unknown")}">${escapeHtml(item.business_state_label || item.state_label || "待处理")}</span>
+            <div class="technical-hint">技术态：${escapeHtml(item.technical_state_label || "未执行")}</div>
+            <div title="${escapeHtml(item.business_explanation || "-")}">${escapeHtml(truncate(item.business_explanation || "-"))}</div>
+          </td>
+          <td>
+            <a href="${escapeHtml(item.detail_url || "#")}">查看任务</a>
+            ${item.can_execute ? `<button class="action-button danger" data-action="execute" data-module-code="review" data-task-id="${escapeHtml(item.task_plan_id)}" data-dry-run="false">一键审核</button>` : '<span class="muted">不可自动执行</span>'}
+          </td>
+        </tr>
+      `;
+      })
+      .join("");
+
+    setElementText("review-pending-page-info", `第 ${currentPage} 页 / 共 ${totalPages} 页`);
+    const prevBtn = document.getElementById("review-pending-prev");
+    const nextBtn = document.getElementById("review-pending-next");
+    if (prevBtn) prevBtn.disabled = currentPage <= 1;
+    if (nextBtn) nextBtn.disabled = currentPage >= totalPages;
+  }
+
   await Promise.allSettled([
     loadSection({
-      sectionName: "模块健康检查",
-      loader: () => getJson("/health/modules/inspection"),
-      errorId: "inspection-health-error",
-      retryId: "inspection-health-retry",
-      onSuccess: (result) => {
-        renderModuleHealthPanel("inspection", result.item);
-      },
-    }),
-    loadSection({
       sectionName: "模块状态",
-      loader: () => getJson("/api/ops/modules/inspection/summary"),
-      errorId: "inspection-summary-error",
-      retryId: "inspection-summary-retry",
+      loader: () => getJson("/api/ops/modules/review/summary"),
+      errorId: "review-summary-error",
+      retryId: "review-summary-retry",
       onSuccess: (result) => {
-        renderDataMeta("inspection-summary-meta", result.meta);
-        inspectionState.summaryItem = result.item || {};
-        renderInspectionSummary();
+        renderDataMeta("review-summary-meta", result.meta);
+        reviewState.summaryItem = result.item || {};
+        renderReviewSummary();
       },
     }),
     loadSection({
-      sectionName: "待闭环任务",
-      loader: () => getJson(`/api/ops/modules/inspection/pending${monthQuery ? `${monthQuery}&limit=100` : "?limit=100"}`),
-      errorId: "inspection-pending-error",
-      retryId: "inspection-pending-retry",
+      sectionName: "待审核项目",
+      loader: () => getJson("/api/ops/modules/review/pending?limit=200"),
+      errorId: "review-pending-error",
+      retryId: "review-pending-retry",
       onSuccess: (result) => {
-        renderDataMeta("inspection-pending-meta", result.meta);
         const items = result.items || [];
-        inspectionState.pendingItems = items;
-        inspectionState.pendingPage = 1;
-        renderInspectionPending();
-        const executable = items.filter((item) => item.can_execute).length;
-        const btn = document.getElementById("inspection-execute-all-btn");
-        if (btn) {
-          btn.dataset.totalCount = String(executable);
-          btn.disabled = executable === 0;
-          btn.textContent = `一键上传报告并闭环全部（${executable}）`;
+        reviewState.pendingItems = items;
+        reviewState.pendingPage = 1;
+        renderReviewPending();
+        const executableCount = items.filter((item) => item.can_execute).length;
+        const executeAllBtn = document.getElementById("review-execute-all-btn");
+        if (executeAllBtn) {
+          executeAllBtn.dataset.totalCount = String(executableCount);
+          executeAllBtn.disabled = executableCount === 0;
+          executeAllBtn.textContent = `一键审核全部（后台执行 ${executableCount}）`;
         }
-        inspectionState.pendingCount = items.length;
-        renderInspectionSummary();
-      },
-    }),
-    loadSection({
-      sectionName: "最近闭环",
-      loader: () => getJson(`/api/ops/modules/inspection/recent/inspection${monthQuery ? `${monthQuery}&limit=10` : "?limit=10"}`),
-      errorId: "inspection-recent-error",
-      retryId: "inspection-recent-retry",
-      onSuccess: (result) => {
-        renderDataMeta("inspection-recent-meta", result.meta);
-        const items = result.items || [];
-        const tbody = document.getElementById("inspection-recent-tbody");
-        if (!tbody) return;
-        if (!items.length) {
-          tbody.innerHTML = "";
-          setElementVisible("inspection-recent-empty", true);
-        } else {
-          setElementVisible("inspection-recent-empty", false);
-          tbody.innerHTML = items
-            .map((item) => `
-              <tr>
-                <td>${escapeHtml(item.inspection_month || month || "-")}</td>
-                <td>${escapeHtml(item.customer_name || "未知客户")}</td>
-                <td>${escapeHtml(fmtDateTime(item.occurred_at))}</td>
-                <td><a href="${escapeHtml(item.final_link)}" target="_blank" rel="noreferrer">${escapeHtml(item.final_link)}</a></td>
-                <td>${item.detail_url ? `<a href="${escapeHtml(item.detail_url)}">查看执行记录</a>` : ""}</td>
-              </tr>
-            `)
-            .join("");
-        }
-      },
-    }),
-    loadSection({
-      sectionName: "已审核工单",
-      loader: () => getJson(`/api/ops/modules/inspection/reviewed/inspection${monthQuery ? `${monthQuery}&limit=100` : "?limit=100"}`),
-      errorId: "inspection-reviewed-error",
-      retryId: "inspection-reviewed-retry",
-      onSuccess: (result) => {
-        renderDataMeta("inspection-reviewed-meta", result.meta);
-        const items = result.items || [];
-        const tbody = document.getElementById("inspection-reviewed-tbody");
-        if (!tbody) return;
-        if (!items.length) {
-          tbody.innerHTML = "";
-          setElementVisible("inspection-reviewed-empty", true);
-        } else {
-          setElementVisible("inspection-reviewed-empty", false);
-          tbody.innerHTML = items
-            .map((item) => `
-              <tr>
-                <td>${escapeHtml(item.inspection_month || month || "-")}</td>
-                <td>${escapeHtml(item.customer_name || "未知客户")}</td>
-                <td><span class="badge status-${escapeHtml(item.state_tone || "unknown")}">${escapeHtml(item.state_label || "已审核工单（无需处理）")}</span></td>
-                <td>${item.work_order_link ? `<a href="${escapeHtml(item.work_order_link)}" target="_blank" rel="noreferrer">工单链接</a>` : "无"}</td>
-                <td>${escapeHtml(item.latest_run_time ? fmtDateTime(item.latest_run_time) : "未执行")}</td>
-                <td>${item.detail_url ? `<a href="${escapeHtml(item.detail_url)}">查看任务</a>` : ""}</td>
-              </tr>
-            `)
-            .join("");
-        }
-      },
-    }),
-    loadSection({
-      sectionName: "无需处理",
-      loader: () => getJson(`/api/ops/modules/inspection/no-action/inspection${monthQuery ? `${monthQuery}&limit=100` : "?limit=100"}`),
-      errorId: "inspection-no-action-error",
-      retryId: "inspection-no-action-retry",
-      onSuccess: (result) => {
-        renderDataMeta("inspection-no-action-meta", result.meta);
-        const items = result.items || [];
-        const tbody = document.getElementById("inspection-no-action-tbody");
-        if (!tbody) return;
-        if (!items.length) {
-          tbody.innerHTML = "";
-          setElementVisible("inspection-no-action-empty", true);
-        } else {
-          setElementVisible("inspection-no-action-empty", false);
-          tbody.innerHTML = items
-            .map((item) => `
-              <tr>
-                <td>${escapeHtml(item.inspection_month || month || "-")}</td>
-                <td>${escapeHtml(item.customer_name || "未知客户")}</td>
-                <td><span class="badge status-${escapeHtml(item.state_tone || "unknown")}">${escapeHtml(item.state_label || "无需处理")}</span></td>
-                <td>${escapeHtml(item.executor_name || "未识别")}</td>
-                <td>${item.work_order_link ? `<a href="${escapeHtml(item.work_order_link)}" target="_blank" rel="noreferrer">工单链接</a>` : "无"}</td>
-                <td>${escapeHtml(item.latest_run_time ? fmtDateTime(item.latest_run_time) : "未执行")}</td>
-                <td>${item.detail_url ? `<a href="${escapeHtml(item.detail_url)}">查看任务</a>` : ""}</td>
-              </tr>
-            `)
-            .join("");
-        }
+        renderReviewSummary();
       },
     }),
   ]);
 
-  ["inspection-health-retry", "inspection-summary-retry", "inspection-pending-retry", "inspection-recent-retry", "inspection-reviewed-retry", "inspection-no-action-retry"].forEach((id) => {
+  const retryBtns = ["review-summary-retry", "review-pending-retry"];
+  retryBtns.forEach((id) => {
     const btn = document.getElementById(id);
     if (!btn || btn.dataset.bound === "1") return;
     btn.dataset.bound = "1";
     btn.addEventListener("click", async () => {
-      await loadInspectionModuleData(meta);
+      await loadReviewModuleData(meta);
     });
   });
-  const pendingPrevBtn = document.getElementById("inspection-pending-prev");
+  const pendingPrevBtn = document.getElementById("review-pending-prev");
   if (pendingPrevBtn && pendingPrevBtn.dataset.bound !== "1") {
     pendingPrevBtn.dataset.bound = "1";
     pendingPrevBtn.addEventListener("click", () => {
-      if (inspectionState.pendingPage <= 1) return;
-      inspectionState.pendingPage -= 1;
-      renderInspectionPending();
+      if (reviewState.pendingPage <= 1) return;
+      reviewState.pendingPage -= 1;
+      renderReviewPending();
     });
   }
-  const pendingNextBtn = document.getElementById("inspection-pending-next");
+  const pendingNextBtn = document.getElementById("review-pending-next");
   if (pendingNextBtn && pendingNextBtn.dataset.bound !== "1") {
     pendingNextBtn.dataset.bound = "1";
     pendingNextBtn.addEventListener("click", () => {
-      const totalPages = Math.max(1, Math.ceil((inspectionState.pendingItems || []).length / (inspectionState.pendingPageSize || 5)));
-      if (inspectionState.pendingPage >= totalPages) return;
-      inspectionState.pendingPage += 1;
-      renderInspectionPending();
+      const totalPages = Math.max(1, Math.ceil((reviewState.pendingItems || []).length / (reviewState.pendingPageSize || 5)));
+      if (reviewState.pendingPage >= totalPages) return;
+      reviewState.pendingPage += 1;
+      renderReviewPending();
     });
   }
 }
@@ -847,6 +663,9 @@ async function loadProactiveModuleData(meta) {
     pendingItems: [],
     pendingPage: 1,
     pendingPageSize: 5,
+    tagMarkItems: [],
+    tagMarkPage: 1,
+    tagMarkPageSize: 5,
     recentItems: [],
     recentPage: 1,
     recentPageSize: 5,
@@ -903,7 +722,8 @@ async function loadProactiveModuleData(meta) {
   function renderProactivePending() {
     const tbody = document.getElementById("proactive-pending-tbody");
     if (!tbody) return;
-    const items = proactiveState.pendingItems || [];
+    const allItems = proactiveState.pendingItems || [];
+    const items = allItems.filter((item) => item.task_type !== "proactive_tag_mark");
     const pageSize = proactiveState.pendingPageSize || 5;
     const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
     if (proactiveState.pendingPage > totalPages) {
@@ -929,8 +749,8 @@ async function loadProactiveModuleData(meta) {
           <td>${escapeHtml(item.visit_owner || "未识别")}</td>
           <td>${escapeHtml(item.latest_run_time ? fmtDateTime(item.latest_run_time) : "未执行")}</td>
           <td>
-            <div>${escapeHtml(item.business_explanation || "-")}</div>
-            <div class="technical-hint">技术态：${escapeHtml(item.technical_state_label || "未执行")} ${escapeHtml(item.technical_detail || "")}</div>
+            <div title="${escapeHtml(item.business_explanation || "-")}">${escapeHtml(truncate(item.business_explanation || "-"))}</div>
+            <div class="technical-hint">技术态：${escapeHtml(item.technical_state_label || "未执行")} ${escapeHtml(truncate(item.technical_detail || "", 80))}</div>
           </td>
           <td>
             <a href="${escapeHtml(item.detail_url || "#")}">查看任务</a>
@@ -948,12 +768,70 @@ async function loadProactiveModuleData(meta) {
     if (nextBtn) nextBtn.disabled = currentPage >= totalPages;
   }
 
+  function renderProactiveTagMark() {
+    const tbody = document.getElementById("proactive-tag-mark-tbody");
+    if (!tbody) return;
+    const items = proactiveState.tagMarkItems || [];
+    const pageSize = proactiveState.tagMarkPageSize || 5;
+    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+    if (proactiveState.tagMarkPage > totalPages) {
+      proactiveState.tagMarkPage = totalPages;
+    }
+    const currentPage = Math.max(1, proactiveState.tagMarkPage || 1);
+    const startIndex = (currentPage - 1) * pageSize;
+    const pageItems = items.slice(startIndex, startIndex + pageSize);
+
+    if (!items.length) {
+      tbody.innerHTML = "";
+      setElementVisible("proactive-tag-mark-empty", true);
+      setElementVisible("proactive-tag-mark-pagination", false);
+      return;
+    }
+
+    setElementVisible("proactive-tag-mark-empty", false);
+    setElementVisible("proactive-tag-mark-pagination", true);
+    tbody.innerHTML = pageItems
+      .map((item) => {
+        const liaisonStatus = item.planned_payload?.liaison_status || item.normalized_data?.liaison_status || "未知";
+        const tagName = item.planned_payload?.tag_name || "-";
+        return `
+        <tr>
+          <td>${escapeHtml(item.customer_name || "未知客户")}</td>
+          <td>${escapeHtml(liaisonStatus)}</td>
+          <td>${escapeHtml(tagName)}</td>
+          <td>${escapeHtml(item.latest_run_time ? fmtDateTime(item.latest_run_time) : "未执行")}</td>
+          <td>
+            <div title="${escapeHtml(item.business_explanation || "-")}">${escapeHtml(truncate(item.business_explanation || "-"))}</div>
+            <div class="technical-hint">技术态：${escapeHtml(item.technical_state_label || "未执行")} ${escapeHtml(truncate(item.technical_detail || "", 80))}</div>
+          </td>
+          <td>
+            <a href="${escapeHtml(item.detail_url || "#")}">查看任务</a>
+            <button class="action-button secondary" data-action="precheck" data-task-id="${escapeHtml(item.task_plan_id)}">预检查</button>
+            <button class="action-button danger" data-action="execute" data-task-id="${escapeHtml(item.task_plan_id)}" data-dry-run="false">执行</button>
+          </td>
+        </tr>
+      `;
+      })
+      .join("");
+
+    setElementText("proactive-tag-mark-page-info", `第 ${currentPage} 页 / 共 ${totalPages} 页`);
+    const prevBtn = document.getElementById("proactive-tag-mark-prev");
+    const nextBtn = document.getElementById("proactive-tag-mark-next");
+    if (prevBtn) prevBtn.disabled = currentPage <= 1;
+    if (nextBtn) nextBtn.disabled = currentPage >= totalPages;
+  }
+
   function renderProactiveSummary() {
     const item = proactiveState.summaryItem || {};
     const badge = document.getElementById("proactive-summary-sync-badge");
     if (badge) {
-      badge.className = `badge status-${item.latest_sync_status || "unknown"}`;
-      badge.textContent = item.latest_sync_status_label || "未同步";
+      if (item.latest_sync_status) {
+        badge.className = `badge status-${item.latest_sync_status}`;
+        badge.textContent = item.latest_sync_status_label;
+        badge.style.display = "";
+      } else {
+        badge.style.display = "none";
+      }
     }
     const filtered = proactiveState.filteredCount == null ? "加载中" : String(proactiveState.filteredCount);
     const total = proactiveState.totalCount == null ? "加载中" : String(proactiveState.totalCount);
@@ -1018,15 +896,6 @@ async function loadProactiveModuleData(meta) {
 
   await Promise.allSettled([
     loadSection({
-      sectionName: "模块健康检查",
-      loader: () => getJson("/health/modules/proactive"),
-      errorId: "proactive-health-error",
-      retryId: "proactive-health-retry",
-      onSuccess: (result) => {
-        renderModuleHealthPanel("proactive", result.item);
-      },
-    }),
-    loadSection({
       sectionName: "模块状态",
       loader: () => getJson("/api/ops/modules/proactive/summary"),
       errorId: "proactive-summary-error",
@@ -1046,17 +915,27 @@ async function loadProactiveModuleData(meta) {
       errorId: "proactive-pending-error",
       retryId: "proactive-pending-retry",
       onSuccess: (result) => {
-        renderDataMeta("proactive-pending-meta", result.meta);
         const items = result.items || [];
         proactiveState.pendingItems = items;
         proactiveState.pendingPage = 1;
+        proactiveState.tagMarkItems = items.filter((item) => item.task_type === "proactive_tag_mark");
+        proactiveState.tagMarkPage = 1;
         renderProactivePending();
-        const executableCount = items.filter((item) => item.can_execute).length;
+        renderProactiveTagMark();
+        const visitCloseItems = items.filter((item) => item.task_type !== "proactive_tag_mark");
+        const visitCloseExecutable = visitCloseItems.filter((item) => item.can_execute).length;
         const executeAllBtn = document.getElementById("proactive-execute-all-btn");
         if (executeAllBtn) {
-          executeAllBtn.dataset.totalCount = String(executableCount);
-          executeAllBtn.disabled = executableCount === 0;
-          executeAllBtn.textContent = `一键执行闭环全部（后台执行 ${executableCount}）`;
+          executeAllBtn.dataset.totalCount = String(visitCloseExecutable);
+          executeAllBtn.disabled = visitCloseExecutable === 0;
+          executeAllBtn.textContent = `一键执行闭环全部（后台执行 ${visitCloseExecutable}）`;
+        }
+        const tagMarkExecutable = proactiveState.tagMarkItems.filter((item) => item.can_execute).length;
+        const tagMarkExecuteAllBtn = document.getElementById("proactive-tag-mark-execute-all-btn");
+        if (tagMarkExecuteAllBtn) {
+          tagMarkExecuteAllBtn.dataset.totalCount = String(tagMarkExecutable);
+          tagMarkExecuteAllBtn.disabled = tagMarkExecutable === 0;
+          tagMarkExecuteAllBtn.textContent = `一键打标全部（后台执行 ${tagMarkExecutable}）`;
         }
         proactiveState.filteredCount = items.length;
         if (Number.isFinite(Number(proactiveState.summaryItem?.planned_tasks))) {
@@ -1085,7 +964,6 @@ async function loadProactiveModuleData(meta) {
       errorId: "proactive-recent-error",
       retryId: "proactive-recent-retry",
       onSuccess: (result) => {
-        renderDataMeta("proactive-recent-meta", result.meta);
         proactiveState.recentItems = result.items || [];
         proactiveState.recentPage = 1;
         renderProactiveRecent();
@@ -1094,7 +972,7 @@ async function loadProactiveModuleData(meta) {
   ]);
 
   await refreshProactiveAutoExecuteStats();
-  ["proactive-health-retry", "proactive-summary-retry", "proactive-pending-retry", "proactive-recent-retry"].forEach((id) => {
+  ["proactive-summary-retry", "proactive-pending-retry", "proactive-recent-retry", "proactive-tag-mark-retry"].forEach((id) => {
     const btn = document.getElementById(id);
     if (!btn || btn.dataset.bound === "1") return;
     btn.dataset.bound = "1";
@@ -1140,6 +1018,25 @@ async function loadProactiveModuleData(meta) {
       renderProactiveRecent();
     });
   }
+  const tagMarkPrevBtn = document.getElementById("proactive-tag-mark-prev");
+  if (tagMarkPrevBtn && tagMarkPrevBtn.dataset.bound !== "1") {
+    tagMarkPrevBtn.dataset.bound = "1";
+    tagMarkPrevBtn.addEventListener("click", () => {
+      if (proactiveState.tagMarkPage <= 1) return;
+      proactiveState.tagMarkPage -= 1;
+      renderProactiveTagMark();
+    });
+  }
+  const tagMarkNextBtn = document.getElementById("proactive-tag-mark-next");
+  if (tagMarkNextBtn && tagMarkNextBtn.dataset.bound !== "1") {
+    tagMarkNextBtn.dataset.bound = "1";
+    tagMarkNextBtn.addEventListener("click", () => {
+      const totalPages = Math.max(1, Math.ceil((proactiveState.tagMarkItems || []).length / (proactiveState.tagMarkPageSize || 5)));
+      if (proactiveState.tagMarkPage >= totalPages) return;
+      proactiveState.tagMarkPage += 1;
+      renderProactiveTagMark();
+    });
+  }
 }
 
 function renderDashboardSummaryCards(items) {
@@ -1151,40 +1048,38 @@ function renderDashboardSummaryCards(items) {
   }
   grid.innerHTML = items
     .map((item) => {
-      const scheduleText = item.schedule_enabled
-        ? `${item.schedule_type || ""}:${item.schedule_value || ""}`
-        : "未配置";
+      const runningIndicator = item.sync_running
+        ? '<span class="sync-running-indicator" title="正在同步中…"></span>'
+        : "";
+      const badgeHtml = item.latest_sync_status
+        ? `<span class="badge status-${escapeHtml(item.latest_sync_status)}">${escapeHtml(item.latest_sync_status_label)}</span>`
+        : "";
+      const failedText = (item.failed_task_count ?? 0) > 0
+        ? `${item.failed_task_count ?? 0}${(item.retryable_task_count ?? 0) > 0 ? `（可重试 ${item.retryable_task_count}）` : ""}`
+        : "0";
       const explanation = item.latest_execute_explanation
-        ? `<p class="ops-note">${escapeHtml(item.latest_execute_explanation)}</p>`
+        ? `<details class="explanation-details"><summary>查看执行说明</summary><p class="ops-note">${escapeHtml(item.latest_execute_explanation)}</p></details>`
         : "";
       return `
         <article class="card module-card">
           <div class="card-head">
             <div>
-              <h4>${escapeHtml(item.module_name || "")}</h4>
-              <p class="muted">${escapeHtml(item.module_code || "")}</p>
+              <h4>${escapeHtml(item.module_name || "")}${runningIndicator}</h4>
             </div>
-            <span class="badge status-${escapeHtml(item.latest_sync_status || "unknown")}">${escapeHtml(item.latest_sync_status_label || "未同步")}</span>
+            ${badgeHtml}
           </div>
           <dl class="stats">
             <div><dt>最近同步</dt><dd>${escapeHtml(fmtDateTime(item.latest_snapshot_time))}</dd></div>
             <div><dt>最近执行</dt><dd>${escapeHtml(item.latest_execute_status_label || "暂无")}</dd></div>
             <div><dt>记录数</dt><dd>${escapeHtml(item.row_count ?? 0)}</dd></div>
             <div><dt>待执行</dt><dd>${escapeHtml(item.planned_tasks ?? 0)}</dd></div>
-            <div><dt>已跳过</dt><dd>${escapeHtml(item.skipped_tasks ?? 0)}</dd></div>
-            <div><dt>需人工处理</dt><dd>${escapeHtml(item.manual_required_count ?? 0)}</dd></div>
-            <div><dt>失败任务</dt><dd>${escapeHtml(item.failed_task_count ?? 0)}</dd></div>
-            <div><dt>可重试</dt><dd>${escapeHtml(item.retryable_task_count ?? 0)}</dd></div>
-            <div><dt>调度</dt><dd>${escapeHtml(scheduleText)}</dd></div>
-            <div><dt>运行中</dt><dd>${item.sync_running ? "是" : "否"}</dd></div>
+            <div><dt>需人工</dt><dd>${escapeHtml(item.manual_required_count ?? 0)}</dd></div>
+            <div><dt>失败</dt><dd>${failedText}</dd></div>
           </dl>
           ${explanation}
           <div class="card-actions">
             <button class="action-button" data-action="sync" data-module-code="${escapeHtml(item.module_code || "")}">立即同步</button>
-            <button class="action-button secondary" data-action="rerun-sync" data-module-code="${escapeHtml(item.module_code || "")}">重跑同步</button>
             <a class="module-entry-link" href="/console/modules/${escapeHtml(item.module_code || "")}">进入模块</a>
-            <a href="/console/snapshots?module_code=${escapeHtml(item.module_code || "")}">查看快照</a>
-            <a href="/console/tasks?module_code=${escapeHtml(item.module_code || "")}">查看任务</a>
           </div>
         </article>
       `;
@@ -1192,104 +1087,19 @@ function renderDashboardSummaryCards(items) {
     .join("");
 }
 
-function renderDashboardFailures(items) {
-  const list = document.getElementById("dashboard-failures-list");
-  if (!list) return;
-  if (!items.length) {
-    list.innerHTML = "";
-    setElementVisible("dashboard-failures-empty", true);
-    return;
-  }
-  setElementVisible("dashboard-failures-empty", false);
-  list.innerHTML = items
-    .map((item) => `
-      <li>
-        <strong>${escapeHtml(item.module_code || "")}</strong>
-        <span class="badge status-${escapeHtml(item.status_tone || "unknown")}">${escapeHtml(item.display_status || "未知状态")}</span>
-        <span>${escapeHtml(item.customer_name || item.title || "未命名")}</span>
-        <span class="muted">${escapeHtml(item.business_explanation || "-")}</span>
-        ${item.retryable ? '<span class="badge status-warning">可重试</span>' : ""}
-        ${
-          item.task_plan_id
-            ? `<a href="${escapeHtml(item.detail_url || "#")}">查看详情</a>
-               <button class="action-button secondary" data-action="rerun-task" data-task-id="${escapeHtml(item.task_plan_id)}" data-dry-run="false">重跑任务</button>`
-            : (item.module_code ? `<button class="action-button secondary" data-action="rerun-sync" data-module-code="${escapeHtml(item.module_code)}">重跑同步</button>` : "")
-        }
-      </li>
-    `)
-    .join("");
-}
-
-function renderDashboardManualRequired(items) {
-  const tbody = document.getElementById("dashboard-manual-tbody");
-  if (!tbody) return;
-  if (!items.length) {
-    tbody.innerHTML = "";
-    setElementVisible("dashboard-manual-empty", true);
-    return;
-  }
-  setElementVisible("dashboard-manual-empty", false);
-  tbody.innerHTML = items
-    .map((item) => `
-      <tr>
-        <td>${escapeHtml(item.module_code || "")}</td>
-        <td>${escapeHtml(item.customer_name || "未知客户")}</td>
-        <td>${escapeHtml(item.task_plan_id || "-")}</td>
-        <td><span class="badge status-${escapeHtml(item.status_tone || "unknown")}">${escapeHtml(item.display_status || "未知状态")}</span></td>
-        <td>${escapeHtml(item.business_explanation || "-")}</td>
-        <td>${escapeHtml(fmtDateTime(item.occurred_at))}</td>
-        <td>
-          ${item.detail_url ? `<a href="${escapeHtml(item.detail_url)}">查看详情</a>` : ""}
-          ${item.task_plan_id ? `<button class="action-button secondary" data-action="rerun-task" data-task-id="${escapeHtml(item.task_plan_id)}" data-dry-run="false">重跑</button>` : ""}
-        </td>
-      </tr>
-    `)
-    .join("");
-}
-
 async function loadDashboardData() {
   await Promise.allSettled([
-    loadSection({
-      sectionName: "模块健康检查",
-      loader: () => getJson("/health/modules"),
-      errorId: "dashboard-health-error",
-      retryId: "dashboard-health-retry",
-      onSuccess: (result) => {
-        renderDashboardHealth(result.items || []);
-      },
-    }),
     loadSection({
       sectionName: "模块总览",
       loader: () => getJson("/api/ops/dashboard/summary"),
       errorId: "dashboard-summary-error",
       retryId: "dashboard-summary-retry",
       onSuccess: (result) => {
-        renderDataMeta("dashboard-summary-meta", result.meta);
         renderDashboardSummaryCards(result.items || []);
       },
     }),
-    loadSection({
-      sectionName: "失败任务",
-      loader: () => getJson("/api/ops/dashboard/failures?limit=10"),
-      errorId: "dashboard-failures-error",
-      retryId: "dashboard-failures-retry",
-      onSuccess: (result) => {
-        renderDataMeta("dashboard-failures-meta", result.meta);
-        renderDashboardFailures(result.items || []);
-      },
-    }),
-    loadSection({
-      sectionName: "人工处理清单",
-      loader: () => getJson("/api/ops/dashboard/manual-required?limit=10"),
-      errorId: "dashboard-manual-error",
-      retryId: "dashboard-manual-retry",
-      onSuccess: (result) => {
-        renderDataMeta("dashboard-manual-meta", result.meta);
-        renderDashboardManualRequired(result.items || []);
-      },
-    }),
   ]);
-  ["dashboard-health-retry", "dashboard-summary-retry", "dashboard-failures-retry", "dashboard-manual-retry"].forEach((id) => {
+  ["dashboard-summary-retry"].forEach((id) => {
     const btn = document.getElementById(id);
     if (!btn || btn.dataset.bound === "1") return;
     btn.dataset.bound = "1";
@@ -1305,8 +1115,8 @@ function initModulePageHydration() {
   const moduleCode = (meta.dataset.moduleCode || "").trim();
   if (moduleCode === "visit") {
     loadVisitModuleData(meta);
-  } else if (moduleCode === "inspection") {
-    loadInspectionModuleData(meta);
+  } else if (moduleCode === "review") {
+    loadReviewModuleData(meta);
   } else if (moduleCode === "proactive") {
     loadProactiveModuleData(meta);
   }
@@ -1320,24 +1130,22 @@ function initDashboardHydration() {
 
 async function handleSync(button) {
   const moduleCode = button.dataset.moduleCode;
-  const syncMonths = moduleCode === "inspection" ? getInspectionSyncMonths() : [];
   const visitOwner = moduleCode === "visit" ? getVisitOwnerFilter() : "";
   const proactiveOwner = moduleCode === "proactive" ? getProactiveOwnerFilter() : "";
   const ownerQuery = moduleCode === "visit" ? { visit_owner: visitOwner } : (moduleCode === "proactive" ? { visit_owner: proactiveOwner } : {});
-  renderFeedback("warning", `正在同步 ${moduleCode}...`, { module_code: moduleCode, sync_months: syncMonths, visit_owner: visitOwner || null });
-  const result = await postJson("/api/sync/run", { module_code: moduleCode, force: false, sync_months: syncMonths });
+  renderFeedback("warning", `正在同步 ${moduleCode}...`, { module_code: moduleCode, visit_owner: visitOwner || null });
+  const result = await postJson("/api/sync/run", { module_code: moduleCode, force: false });
   renderFeedback("success", `同步完成：${moduleCode}`, result);
   scheduleRefresh(1200, ownerQuery);
 }
 
 async function handleSyncRerun(button) {
   const moduleCode = button.dataset.moduleCode;
-  const syncMonths = moduleCode === "inspection" ? getInspectionSyncMonths() : [];
   const visitOwner = moduleCode === "visit" ? getVisitOwnerFilter() : "";
   const proactiveOwner = moduleCode === "proactive" ? getProactiveOwnerFilter() : "";
   const ownerQuery = moduleCode === "visit" ? { visit_owner: visitOwner } : (moduleCode === "proactive" ? { visit_owner: proactiveOwner } : {});
-  renderFeedback("warning", `正在重跑同步 ${moduleCode}...`, { module_code: moduleCode, sync_months: syncMonths, visit_owner: visitOwner || null });
-  const result = await postJson(`/api/modules/${moduleCode}/sync/rerun`, { sync_months: syncMonths });
+  renderFeedback("warning", `正在重跑同步 ${moduleCode}...`, { module_code: moduleCode, visit_owner: visitOwner || null });
+  const result = await postJson(`/api/modules/${moduleCode}/sync/rerun`, {});
   renderFeedback("success", `重跑完成：${moduleCode}`, result);
   scheduleRefresh(1200, ownerQuery);
 }
@@ -1362,8 +1170,8 @@ async function handleExecute(button) {
   const taskId = button.dataset.taskId;
   const dryRun = button.dataset.dryRun === "true";
   const moduleCode = (button.dataset.moduleCode || "").trim();
-  const inVisitPage = window.location.pathname.startsWith("/console/modules/visit");
-  if (moduleCode !== "visit" && !inVisitPage) {
+  const usesAsyncQueue = moduleCode === "visit" || moduleCode === "review";
+  if (!usesAsyncQueue) {
     renderFeedback("warning", `正在执行 task ${taskId}...`, { task_id: taskId, dry_run: dryRun });
     const result = await postJson(`/api/tasks/${taskId}/execute`, { dry_run: dryRun });
     const status = result.item?.run_status || "unknown";
@@ -1372,11 +1180,10 @@ async function handleExecute(button) {
     scheduleRefresh();
     return;
   }
-  const visitOwner = getVisitOwnerFilter();
   renderFeedback("warning", `正在提交后台执行 task ${taskId}...`, { task_id: taskId, dry_run: dryRun });
   const result = await postJson(`/api/tasks/${taskId}/enqueue-execute`, { dry_run: dryRun });
   renderFeedback("warning", "已提交后台执行队列", result);
-  await pollBatchStatus(result.batch_id, { extraQuery: { visit_owner: visitOwner } });
+  await pollBatchStatus(result.batch_id, { extraQuery: {} });
 }
 
 async function handleExecuteAllVisit(button) {
@@ -1404,7 +1211,7 @@ async function handleExecuteAllProactive(button) {
     return;
   }
   renderFeedback("warning", `正在提交主动回访批量后台执行${ownerLabel}...`, { module_code: "proactive", total_count: totalCount, visit_owner: visitOwner || null });
-  const payload = { module_code: "proactive", dry_run: false };
+  const payload = { module_code: "proactive", dry_run: false, task_types: ["proactive_visit_close"] };
   if (visitOwner) {
     payload.visit_owner = visitOwner;
   }
@@ -1413,16 +1220,26 @@ async function handleExecuteAllProactive(button) {
   await pollBatchStatus(result.batch_id, { extraQuery: { visit_owner: visitOwner } });
 }
 
-async function handleExecuteAllInspection(button) {
+async function handleExecuteAllProactiveTagMark(button) {
   const totalCount = Number.parseInt(button.dataset.totalCount || "0", 10);
-  const month = button.dataset.month || "";
-  if (!window.confirm(`将按顺序上传 Word 报告并闭环 ${month || "当前筛选"} 的全部巡检任务（当前 ${totalCount} 条）。是否继续？`)) {
+  if (!window.confirm(`将把全部待打标任务提交到后台队列执行（当前 ${totalCount} 条）。是否继续？`)) {
     return;
   }
-  renderFeedback("warning", "正在批量上传报告并闭环巡检任务...", { module_code: "inspection", total_count: totalCount, month });
-  const result = await postJson("/api/tasks/batch/execute-pending", { module_code: "inspection", month, dry_run: false });
-  renderFeedback("success", "巡检批量执行完成", result);
-  scheduleRefresh(2200);
+  renderFeedback("warning", `正在提交打标批量后台执行...`, { module_code: "proactive", total_count: totalCount });
+  const result = await postJson("/api/tasks/batch/enqueue-pending", { module_code: "proactive", dry_run: false, task_types: ["proactive_tag_mark"] });
+  renderFeedback("warning", "打标批量任务已入队，后台执行中", result);
+  await pollBatchStatus(result.batch_id, { extraQuery: {} });
+}
+
+async function handleExecuteAllReview(button) {
+  const totalCount = Number.parseInt(button.dataset.totalCount || "0", 10);
+  if (!window.confirm(`将把全部待审核任务提交到后台队列执行（当前 ${totalCount} 条）。是否继续？`)) {
+    return;
+  }
+  renderFeedback("warning", `正在提交审核批量后台执行...`, { module_code: "review", total_count: totalCount });
+  const result = await postJson("/api/tasks/batch/enqueue-pending", { module_code: "review", dry_run: false });
+  renderFeedback("warning", "审核批量任务已入队，后台执行中", result);
+  await pollBatchStatus(result.batch_id, { extraQuery: {} });
 }
 
 async function handleTaskRerun(button) {
@@ -1434,61 +1251,6 @@ async function handleTaskRerun(button) {
   const kind = result.item?.manual_required ? "warning" : "success";
   renderFeedback(kind, `重跑结果：${status}`, result);
   scheduleRefresh();
-}
-
-async function handlePtsCookieUpdate(form) {
-  const textarea = form.querySelector("#pts-cookie-input");
-  const cookieHeader = textarea?.value?.trim();
-  if (!cookieHeader) {
-    throw new Error("请先粘贴新的 PTS Cookie");
-  }
-  renderFeedback("warning", "正在更新 PTS Cookie...", { configured: false });
-  const result = await postJson("/api/ops/pts-session", { cookie_header: cookieHeader });
-  if (textarea) {
-    textarea.value = "";
-  }
-  const badge = document.getElementById("pts-session-badge");
-  const updated = document.getElementById("pts-session-updated");
-  if (badge) {
-    badge.className = `badge status-${result.configured ? "success" : "warning"}`;
-    badge.textContent = result.configured ? "已配置" : "未配置";
-  }
-  if (updated) {
-    updated.textContent = result.updated_at ? `最后更新：${result.updated_at}` : "尚未保存";
-  }
-  renderFeedback("success", "PTS Cookie 已更新", {
-    configured: result.configured,
-    updated_at: result.updated_at,
-    source: result.source,
-  });
-}
-
-async function loadExtensionStatus() {
-  try {
-    const result = await getJson("/extension/status");
-    const badge = document.getElementById("pts-extension-badge");
-    const detail = document.getElementById("pts-extension-detail");
-    if (badge) {
-      const state = result.extension_connection?.status || "disconnected";
-      const classMap = {
-        connected: "success",
-        idle: "warning",
-        disconnected: "unknown",
-      };
-      badge.className = `badge status-${classMap[state] || "unknown"}`;
-      badge.textContent = result.extension_connection?.label || "浏览器扩展未连接";
-    }
-    if (detail) {
-      const session = result.pts_session || {};
-      const extensionDetail = result.extension_connection?.detail || "尚未收到浏览器扩展心跳。";
-      const sessionDetail = session.configured
-        ? `当前 PTS 会话来源：${session.source || "env_file"}。`
-        : "当前还没有可用 PTS 会话。";
-      detail.textContent = `${extensionDetail} ${sessionDetail}`;
-    }
-  } catch (_error) {
-    // Ignore extension status failures so manual cookie flow remains available.
-  }
 }
 
 document.addEventListener("click", async (event) => {
@@ -1528,8 +1290,12 @@ document.addEventListener("click", async (event) => {
       await handleExecuteAllProactive(button);
       return;
     }
-    if (button.dataset.action === "execute-all-inspection") {
-      await handleExecuteAllInspection(button);
+    if (button.dataset.action === "execute-all-proactive-tag-mark") {
+      await handleExecuteAllProactiveTagMark(button);
+      return;
+    }
+    if (button.dataset.action === "execute-all-review") {
+      await handleExecuteAllReview(button);
       return;
     }
     if (button.dataset.action === "rerun-task") {
@@ -1538,21 +1304,6 @@ document.addEventListener("click", async (event) => {
   } catch (error) {
     renderFeedback("error", "操作失败", { error: error.message });
   }
-});
-
-document.addEventListener("submit", async (event) => {
-  const form = event.target.closest("#pts-cookie-form");
-  if (!form) return;
-  event.preventDefault();
-  try {
-    await handlePtsCookieUpdate(form);
-  } catch (error) {
-    renderFeedback("error", "PTS Cookie 更新失败", { error: error.message });
-  }
-});
-
-document.addEventListener("DOMContentLoaded", async () => {
-  await loadExtensionStatus();
 });
 
 document.addEventListener("mouseover", (event) => {

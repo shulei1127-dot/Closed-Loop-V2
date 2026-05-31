@@ -1,13 +1,13 @@
 {% extends "console/base.html" %}
 
 {% block content %}
-<div id="dashboard-view-meta" data-inspection-month="{{ inspection_month }}"></div>
+<div id="dashboard-view-meta"></div>
+
 <section class="section">
   <div class="panel">
     <div class="section-head">
       <div>
-        <h3>PTS 会话</h3>
-        <p>支持手动粘贴 Cookie，也支持通过本机浏览器扩展自动接入当前已登录的 PTS 会话。</p>
+        <h3>PTS 连接状态</h3>
       </div>
       <div class="session-status-group">
         <span id="pts-session-badge" class="badge status-{{ 'success' if pts_session_status.configured else 'warning' }}">
@@ -18,45 +18,49 @@
         </span>
       </div>
     </div>
-    <form id="pts-cookie-form" class="stack-form">
-      <label for="pts-cookie-input">PTS Cookie</label>
-      <textarea id="pts-cookie-input" name="cookie_header" rows="4" placeholder="粘贴最新的 PTS Cookie Header" autocomplete="off" spellcheck="false"></textarea>
-      <div class="inline-actions">
-        <button type="submit" class="action-button">应用新 Cookie</button>
-        <span class="muted">仅保存到后端本地 `.env`，不在前端持久化。</span>
-      </div>
-    </form>
-    <div class="inline-actions" style="margin-top: 12px;">
-      <span id="pts-extension-badge" class="badge status-unknown">浏览器扩展未连接</span>
-      <span id="pts-extension-detail" class="muted">如果你已安装浏览器扩展，请把扩展服务地址改成当前 Closed Loop V2 地址，再点击扩展里的 PTS 采集。</span>
-    </div>
-  </div>
-</section>
-
-<section class="section">
-  <div class="panel">
-    <div class="section-head">
-      <h3>模块健康检查</h3>
-      <span id="dashboard-health-badge" class="badge status-unknown">加载中</span>
-    </div>
-    <p id="dashboard-health-summary" class="muted">正在检查平台模块健康状态...</p>
-    <div id="dashboard-health-grid" class="health-grid">
-      <article class="health-card">
-        <h4>加载中</h4>
-        <p class="muted">正在获取模块健康信息...</p>
-      </article>
-    </div>
-    <p id="dashboard-health-error" class="muted" hidden></p>
-    <button id="dashboard-health-retry" class="action-button secondary" type="button" hidden>重试健康检查</button>
+    <table class="data-table compact-table">
+      <tbody>
+        <tr>
+          <td><strong>认证方式</strong></td>
+          <td id="pts-source-label">
+            {% if pts_session_status.api_token_configured %}
+              <span class="badge status-success">API Token（推荐）</span>
+            {% elif pts_session_status.browser_profile_configured %}
+              <span class="badge status-warning">浏览器 Profile</span>
+            {% elif pts_session_status.cookie_configured %}
+              <span class="badge status-warning">Cookie（不推荐）</span>
+            {% else %}
+              <span class="badge status-failed">未配置</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td><strong>API Token</strong></td>
+          <td id="pts-api-token-label">{{ '已配置' if pts_session_status.api_token_configured else '未配置' }}</td>
+        </tr>
+        <tr>
+          <td><strong>API Base URL</strong></td>
+          <td id="pts-api-base-url">{{ pts_session_status.api_base_url or '未设置' }}</td>
+        </tr>
+        <tr>
+          <td><strong>浏览器 Profile</strong></td>
+          <td id="pts-browser-profile-label">
+            {% if pts_session_status.browser_profile_configured %}
+              已配置（{{ pts_session_status.browser_profile_dir }}）
+            {% else %}
+              未配置
+            {% endif %}
+          </td>
+        </tr>
+      </tbody>
+    </table>
   </div>
 </section>
 
 <section class="section">
   <div class="section-head">
     <h3>模块总览</h3>
-    <p>查看最近同步、执行、失败与人工处理状态，并支持手动同步和重跑。</p>
   </div>
-  <p id="dashboard-summary-meta" class="muted">数据时间：加载中...</p>
   <p id="dashboard-summary-error" class="muted" hidden></p>
   <button id="dashboard-summary-retry" class="action-button secondary" type="button" hidden>重试加载模块总览</button>
   <div id="dashboard-summary-grid" class="module-grid">
@@ -73,189 +77,5 @@
   </div>
 </section>
 
-<section class="section">
-  <div class="panel">
-    <div class="section-head">
-      <div>
-        <h4>巡检工单当月待闭环</h4>
-        <p>默认按月份查看执行人是舒磊、巡检已完成、且工单尚未闭环的巡检任务，只上传 Word 报告。</p>
-      </div>
-      <div class="inline-actions">
-        <form class="inline-form" method="get" action="/console">
-          <label for="inspection-month" class="muted">月份</label>
-          <select id="inspection-month" name="inspection_month" onchange="this.form.submit()">
-            {% for month_value in available_inspection_months %}
-            <option value="{{ month_value }}" {% if month_value == inspection_month %}selected{% endif %}>{{ month_value }}</option>
-            {% endfor %}
-          </select>
-        </form>
-        <button class="action-button danger" data-action="execute-all-inspection" data-total-count="{{ pending_inspection_items | length }}" data-month="{{ inspection_month }}" {% if not pending_inspection_items %}disabled{% endif %}>
-          一键上传报告并闭环全部（{{ pending_inspection_items | length }}）
-        </button>
-      </div>
-    </div>
-    {% if pending_inspection_items %}
-    <table class="data-table compact-table">
-      <thead>
-        <tr>
-          <th>月份</th>
-          <th>客户名称</th>
-          <th>执行人</th>
-          <th>巡检工单</th>
-          <th>Word 报告</th>
-          <th>最近执行</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for item in pending_inspection_items %}
-        <tr>
-          <td>{{ item.inspection_month or inspection_month }}</td>
-          <td>{{ item.customer_name or '未知客户' }}</td>
-          <td>{{ item.executor_name or '未识别' }}</td>
-          <td>{% if item.work_order_link %}<a href="{{ item.work_order_link }}" target="_blank" rel="noreferrer">工单链接</a>{% else %}无{% endif %}</td>
-          <td>{{ item.report_word_file or '未匹配到 Word 报告' }}</td>
-          <td>{{ item.latest_run_time | fmt_dt if item.latest_run_time else '未执行' }}</td>
-          <td>
-            <a href="{{ item.detail_url }}">查看任务</a>
-            <button class="action-button danger" data-action="execute" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">上传报告并闭环</button>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% else %}
-    <p class="muted">{{ inspection_month }} 当前没有待闭环巡检任务。</p>
-    {% endif %}
-  </div>
-</section>
 
-<section class="section">
-  <div class="panel">
-    <div class="section-head">
-      <div>
-        <h4>交付转售后待执行回访</h4>
-        <p>这里展示当前仍需由系统创建并闭环的回访任务。执行成功后页面会自动刷新。</p>
-      </div>
-      <div class="inline-actions">
-        <button class="action-button danger" data-action="execute-all-visit" data-total-count="{{ pending_visit_items | length }}" data-visit-owner="舒磊" {% if not pending_visit_items %}disabled{% endif %}>
-          一键创建并闭环全部（{{ pending_visit_items | length }}）
-        </button>
-      </div>
-    </div>
-    {% if pending_visit_items %}
-    <table class="data-table compact-table">
-      <thead>
-        <tr>
-          <th>客户名称</th>
-          <th>回访类型</th>
-          <th>Delivery ID</th>
-          <th>最近执行</th>
-          <th>状态说明</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for item in pending_visit_items %}
-        <tr>
-          <td>{{ item.customer_name or '未知客户' }}</td>
-          <td>{{ item.visit_type or item.task_type }}</td>
-          <td>{{ item.delivery_id or '缺失' }}</td>
-          <td>{{ item.latest_run_time | fmt_dt if item.latest_run_time else '未执行' }}</td>
-          <td>{{ item.business_explanation }}</td>
-          <td>
-            <a href="{{ item.detail_url }}">查看任务</a>
-            {% if item.can_execute %}
-            <button class="action-button danger" data-action="execute" data-task-id="{{ item.task_plan_id }}" data-dry-run="false">一键创建并闭环</button>
-            {% else %}
-            <span class="muted">仅识别</span>
-            {% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% else %}
-    <p class="muted">当前没有待执行回访任务。</p>
-    {% endif %}
-  </div>
-</section>
-
-<section class="section">
-  <div class="panel">
-    <div class="section-head">
-      <div>
-        <h4>最近闭环回访链接</h4>
-        <p>这里展示最新 10 条成功闭环的交付转售后回访链接；数量更多时可查看全部。</p>
-      </div>
-      <div class="inline-actions">
-        <a href="/console/visit-links">查看全部闭环回访链接</a>
-      </div>
-    </div>
-    {% if recent_visit_links %}
-    <table class="data-table compact-table">
-      <thead>
-        <tr>
-          <th>客户名称</th>
-          <th>回访类型</th>
-          <th>闭环时间</th>
-          <th>回访链接</th>
-          <th>详情</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for item in recent_visit_links %}
-        <tr>
-          <td>{{ item.customer_name or '未知客户' }}</td>
-          <td>{{ item.visit_type or '未知类型' }}</td>
-          <td>{{ item.occurred_at | fmt_dt }}</td>
-          <td><a href="{{ item.final_link }}" target="_blank" rel="noreferrer">{{ item.final_link }}</a></td>
-          <td>{% if item.detail_url %}<a href="{{ item.detail_url }}">查看执行记录</a>{% endif %}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    {% else %}
-    <p class="muted">当前还没有成功闭环的回访链接。</p>
-    {% endif %}
-  </div>
-</section>
-
-<section class="section">
-  <div class="two-column">
-    <div class="panel">
-      <h4>失败任务</h4>
-      <p id="dashboard-failures-meta" class="muted">数据时间：加载中...</p>
-      <p id="dashboard-failures-error" class="muted" hidden></p>
-      <button id="dashboard-failures-retry" class="action-button secondary" type="button" hidden>重试加载失败任务</button>
-      <ul id="dashboard-failures-list" class="run-list">
-        <li class="muted">加载中...</li>
-      </ul>
-      <p id="dashboard-failures-empty" class="muted" hidden>当前没有失败项。</p>
-    </div>
-    <div class="panel">
-      <h4>人工处理清单</h4>
-      <p id="dashboard-manual-meta" class="muted">数据时间：加载中...</p>
-      <p id="dashboard-manual-error" class="muted" hidden></p>
-      <button id="dashboard-manual-retry" class="action-button secondary" type="button" hidden>重试加载人工处理清单</button>
-      <table id="dashboard-manual-table" class="data-table compact-table">
-        <thead>
-          <tr>
-            <th>模块</th>
-            <th>客户名称</th>
-            <th>Task ID</th>
-            <th>当前状态</th>
-            <th>业务解释</th>
-            <th>最近运行时间</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="dashboard-manual-tbody">
-          <tr><td colspan="7" class="muted">加载中...</td></tr>
-        </tbody>
-      </table>
-      <p id="dashboard-manual-empty" class="muted" hidden>当前没有人工处理项。</p>
-    </div>
-  </div>
-</section>
 {% endblock %}

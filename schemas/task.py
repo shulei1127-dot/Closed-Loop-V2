@@ -27,6 +27,7 @@ class TaskBatchExecuteRequest(BaseModel):
     month: str | None = None
     visit_owner: str | None = None
     dry_run: bool = False
+    task_types: list[str] | None = None
 
 
 class TaskBatchExecuteResponse(BaseModel):

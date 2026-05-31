@@ -13,31 +13,22 @@ from services.module_registry import default_module_configs
 from services.pts_browser_profile_session import (
     pts_browser_profile_configured,
     pts_browser_profile_enabled,
-    pts_direct_http_enabled,
     resolve_pts_profile_dir,
 )
 from services.pts_session_service import PtsSessionService
-from services.recognizers.visit_delivery_backfill import _find_local_chrome_user_data_dir
 
 
 MODULE_REAL_ENV_KEYS = {
     "visit": (
         "visit_real_execution_enabled",
         "visit_real_base_url",
-        "visit_real_token",
-        "pts_base_url",
-        "pts_cookie_header",
-    ),
-    "inspection": (
-        "inspection_real_execution_enabled",
-        "inspection_real_base_url",
-        "inspection_real_token",
-        "inspection_report_root",
+        "pts_api_token",
+        "pts_api_base_url",
     ),
     "proactive": (
         "visit_real_execution_enabled",
-        "pts_base_url",
-        "pts_cookie_header",
+        "pts_api_token",
+        "pts_api_base_url",
     ),
 }
 
@@ -92,13 +83,15 @@ class EnvironmentCheckService:
             for module_code in MODULE_REAL_ENV_KEYS:
                 latest_snapshot = snapshot_repo.latest_for_module(module_code)
                 checks: list[dict] = []
-                checks.append(self._build_snapshot_check(latest_snapshot))
-                checks.append(self._build_sync_auth_check(latest_snapshot))
-                checks.append(self._build_real_execution_check(module_code))
-                if module_code in {"visit", "inspection", "proactive"}:
+                for check in [
+                    self._build_snapshot_check(latest_snapshot),
+                    self._build_sync_auth_check(latest_snapshot),
+                    self._build_real_execution_check(module_code),
+                ]:
+                    if check:
+                        checks.append(check)
+                if module_code in {"visit", "proactive"}:
                     checks.append(self._build_pts_session_check(pts_session))
-                if module_code == "inspection":
-                    checks.append(self._build_inspection_report_root_check())
 
                 summary = "；".join(check["status_label"] + ":" + check["label"] for check in checks[:2])
                 items.append(
@@ -124,14 +117,12 @@ class EnvironmentCheckService:
     def _module_report(self, module_code: str) -> dict:
         if module_code in {"visit", "proactive"}:
             missing_fields = []
-            if not self.settings.pts_base_url:
-                missing_fields.append("pts_base_url")
+            if not self.settings.pts_api_token:
+                missing_fields.append("pts_api_token")
+            if not self.settings.pts_api_base_url:
+                missing_fields.append("pts_api_base_url")
             browser_profile_enabled = pts_browser_profile_enabled(self.settings)
             browser_profile_configured = pts_browser_profile_configured(self.settings)
-            browser_session_available = browser_profile_configured or _find_local_chrome_user_data_dir() is not None
-            direct_available = bool(self.settings.pts_cookie_header and pts_direct_http_enabled(self.settings))
-            if not browser_profile_configured and not direct_available:
-                missing_fields.append("pts_cookie_header")
             if module_code == "visit" and (self.settings.visit_real_base_url or self.settings.visit_real_token):
                 if not self.settings.visit_real_base_url:
                     missing_fields.append("visit_real_base_url")
@@ -140,11 +131,11 @@ class EnvironmentCheckService:
             return {
                 "ok": not missing_fields,
                 "missing_fields": missing_fields,
-                "browser_session_available": browser_session_available,
+                "api_token_configured": bool(self.settings.pts_api_token),
+                "api_base_url": self.settings.pts_api_base_url,
                 "browser_profile_enabled": browser_profile_enabled,
                 "browser_profile_configured": browser_profile_configured,
                 "browser_profile_dir": str(resolve_pts_profile_dir(self.settings)),
-                "direct_http_enabled": pts_direct_http_enabled(self.settings),
             }
         missing_fields = [
             field_name
@@ -178,12 +169,11 @@ class EnvironmentCheckService:
     def _module_name(self, module_code: str) -> str:
         mapping = {
             "visit": "交付转售后回访",
-            "inspection": "巡检工单闭环",
             "proactive": "超半年主动回访",
         }
         return mapping.get(module_code, module_code)
 
-    def _build_snapshot_check(self, latest_snapshot) -> dict:
+    def _build_snapshot_check(self, latest_snapshot) -> dict | None:
         if latest_snapshot is None:
             return {
                 "code": "latest_sync",
@@ -208,13 +198,7 @@ class EnvironmentCheckService:
                 "detail": detail,
             }
         if sync_status == "partial":
-            return {
-                "code": "latest_sync",
-                "label": "最近同步",
-                "status": "warning",
-                "status_label": "部分成功",
-                "detail": detail,
-            }
+            return None
         return {
             "code": "latest_sync",
             "label": "最近同步",
@@ -273,38 +257,37 @@ class EnvironmentCheckService:
         }
 
     def _build_pts_session_check(self, pts_session: dict) -> dict:
-        if pts_session.get("configured"):
+        source = pts_session.get("source", "unconfigured")
+        if source == "api_token":
             return {
-                "code": "pts_session",
-                "label": "PTS 会话",
+                "code": "pts_api",
+                "label": "PTS API",
                 "status": "ok",
                 "status_label": "可用",
-                "detail": f"当前来源：{pts_session.get('source') or 'env_file'}",
+                "detail": f"Bearer Token 已配置，API 地址：{pts_session.get('api_base_url', '未设置')}",
+            }
+        if source == "browser_profile":
+            return {
+                "code": "pts_api",
+                "label": "PTS API",
+                "status": "warning",
+                "status_label": "备用",
+                "detail": "API Token 未配置，当前使用浏览器 Profile 通道。",
+            }
+        if source == "cookie":
+            return {
+                "code": "pts_api",
+                "label": "PTS API",
+                "status": "warning",
+                "status_label": "降级",
+                "detail": "API Token 未配置，当前使用 Cookie 通道（不推荐）。",
             }
         return {
-            "code": "pts_session",
-            "label": "PTS 会话",
+            "code": "pts_api",
+            "label": "PTS API",
             "status": "failed",
             "status_label": "缺失",
-            "detail": "当前没有可用的 PTS 会话，执行链会失败。",
-        }
-
-    def _build_inspection_report_root_check(self) -> dict:
-        root = Path(self.settings.inspection_report_root)
-        if root.exists() and root.is_dir():
-            return {
-                "code": "report_root",
-                "label": "巡检报告目录",
-                "status": "ok",
-                "status_label": "可用",
-                "detail": str(root),
-            }
-        return {
-            "code": "report_root",
-            "label": "巡检报告目录",
-            "status": "failed",
-            "status_label": "不可用",
-            "detail": f"目录不存在或不可读：{root}",
+            "detail": "PTS API Token 和浏览器 Profile 均未配置，执行链会失败。",
         }
 
     @staticmethod

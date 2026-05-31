@@ -1,57 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+import json
+from unittest.mock import MagicMock
 
-from services.collectors.dingtalk_parallelv2_decoder import DingtalkDocumentStructure
 from services.dingtalk_visit_writeback import DingtalkVisitWritebackService
 from services.executors.schemas import ExecutorContext
-
-
-class _FakeChromeSession:
-    last_calls: list[tuple[str, tuple, dict]] = []
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return None
-
-    async def open_url(self, target_url: str) -> None:
-        self.last_calls.append(("open_url", (target_url,), {}))
-
-    async def wait_until_ready(self) -> None:
-        self.last_calls.append(("wait_until_ready", (), {}))
-
-    async def ensure_column_visible(self, target_field_id: str) -> None:
-        self.last_calls.append(("ensure_column_visible", (target_field_id,), {}))
-
-    async def focus_grid(self, customer_field_id: str) -> None:
-        self.last_calls.append(("focus_grid", (customer_field_id,), {}))
-
-    async def navigate_to_row(self, **kwargs) -> None:
-        self.last_calls.append(("navigate_to_row", (), kwargs))
-
-    async def select_cell(self, **kwargs) -> None:
-        self.last_calls.append(("select_cell", (), kwargs))
-
-    async def move_selection_to_field(self, **kwargs) -> None:
-        self.last_calls.append(("move_selection_to_field", (), kwargs))
-
-    async def open_link_editor(self) -> None:
-        self.last_calls.append(("open_link_editor", (), {}))
-
-    async def fill_link_editor(self, **kwargs) -> None:
-        self.last_calls.append(("fill_link_editor", (), kwargs))
-
-    async def save_link_editor(self) -> None:
-        self.last_calls.append(("save_link_editor", (), {}))
-
-    async def assert_cell_contains(self, **kwargs) -> None:
-        self.last_calls.append(("assert_cell_contains", (), kwargs))
-
-    async def close_link_editor_if_visible(self) -> None:
-        self.last_calls.append(("close_link_editor_if_visible", (), {}))
 
 
 def _build_context() -> ExecutorContext:
@@ -80,33 +34,51 @@ def _build_context() -> ExecutorContext:
     )
 
 
-def test_dingtalk_visit_writeback_succeeds(monkeypatch) -> None:
-    service = DingtalkVisitWritebackService()
-    structure = DingtalkDocumentStructure(
-        sheet_id="Igz9TVd",
-        view_id="AKOehLK",
-        field_name_by_id={"customer-field": "客户名称", "link-field": "回访链接"},
-        field_type_by_id={},
-        field_enum_label_by_id={},
-        view_field_ids=["customer-field", "link-field"],
-        raw_columns=["客户名称", "回访链接"],
-        record_ids=["visit-row-001"],
+def _build_proactive_context() -> ExecutorContext:
+    """超半年主动回访模块的上下文。"""
+    return ExecutorContext(
+        task_plan_id="task-proactive-1",
+        module_code="proactive",
+        task_type="visit_close",
+        plan_status="planned",
+        normalized_record_id="record-proactive-1",
+        source_row_id="proactive-row-001",
+        recognition_status="recognized",
+        planned_payload={},
+        normalized_data={"customer_name": "客户B"},
+        source_url="https://alidocs.dingtalk.com",
+        source_doc_key="J9LnW6jQKp6yelvD",
+        source_view_key="f20Z2ZJ",
+        source_collector_type="dingtalk",
+        source_extra_config={
+            "structured_endpoint": "/api/document/data",
+            "parallelv2_sheet_id": "Z991EZV",
+            "parallelv2_view_id": "f20Z2ZJ",
+            "structured_headers": {
+                "Referer": "https://alidocs.dingtalk.com/iframe/notable?docKey=J9LnW6jQKp6yelvD&sheetId=Z991EZV&viewId=f20Z2ZJ"
+            },
+        },
     )
 
-    async def fake_load_structure(source_config):
-        return structure
 
-    monkeypatch.setattr(service, "_load_structure", fake_load_structure)
-    _FakeChromeSession.last_calls = []
-    fake_session = _FakeChromeSession()
-
-    @asynccontextmanager
-    async def fake_shared_session():
-        yield fake_session
-
+def test_dingtalk_visit_writeback_uses_dws_cli(monkeypatch) -> None:
+    """DWS CLI 可用时，优先使用 DWS CLI 写入回访链接。"""
+    service = DingtalkVisitWritebackService()
     monkeypatch.setattr(
-        "services.dingtalk_visit_writeback._shared_chrome_dingtalk_session",
-        fake_shared_session,
+        "services.dingtalk_visit_writeback._resolve_dws_cli_path",
+        lambda _s: "/usr/local/bin/dws",
+    )
+
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = json.dumps({
+        "status": "success",
+        "data": {"recordIds": ["visit-row-001"]},
+    })
+    fake_result.stderr = ""
+    monkeypatch.setattr(
+        "services.dingtalk_visit_writeback._run_subprocess",
+        lambda cmd: fake_result,
     )
 
     result = asyncio.run(
@@ -117,10 +89,28 @@ def test_dingtalk_visit_writeback_succeeds(monkeypatch) -> None:
     )
 
     assert result["status"] == "success"
-    assert result["field_name"] == "回访链接"
-    assert result["field_id"] == "link-field"
+    assert result["writeback_mode"] == "dws_cli"
     assert result["source_row_id"] == "visit-row-001"
-    assert any(call[0] == "fill_link_editor" for call in _FakeChromeSession.last_calls)
+    assert result["visit_link"] == "https://pts.chaitin.net/return-visit/detail/visit-1"
+
+
+def test_dingtalk_visit_writeback_dws_cli_unavailable_returns_disabled(monkeypatch) -> None:
+    """DWS CLI 不可用时，返回 disabled（不再回退到 Chrome 浏览器自动化）。"""
+    service = DingtalkVisitWritebackService()
+    monkeypatch.setattr(
+        "services.dingtalk_visit_writeback._resolve_dws_cli_path",
+        lambda _s: None,
+    )
+
+    result = asyncio.run(
+        service.write_visit_link(
+            context=_build_context(),
+            final_link="https://pts.chaitin.net/return-visit/detail/visit-1",
+        )
+    )
+
+    assert result["status"] == "skipped"
+    assert result["writeback_mode"] == "disabled"
 
 
 def test_dingtalk_visit_writeback_skips_non_dingtalk_context() -> None:
@@ -138,51 +128,70 @@ def test_dingtalk_visit_writeback_skips_non_dingtalk_context() -> None:
     assert result["writeback_mode"] == "disabled"
 
 
-def test_dingtalk_visit_writeback_reuses_shared_session(monkeypatch) -> None:
+def test_dingtalk_visit_writeback_missing_row_id(monkeypatch) -> None:
+    """source_row_id 缺失时返回 skipped（DWS CLI 无法写入）。"""
     service = DingtalkVisitWritebackService()
-    structure = DingtalkDocumentStructure(
-        sheet_id="Igz9TVd",
-        view_id="AKOehLK",
-        field_name_by_id={"customer-field": "客户名称", "link-field": "回访链接"},
-        field_type_by_id={},
-        field_enum_label_by_id={},
-        view_field_ids=["customer-field", "link-field"],
-        raw_columns=["客户名称", "回访链接"],
-        record_ids=["visit-row-001", "visit-row-002"],
-    )
-
-    async def fake_load_structure(source_config):
-        return structure
-
-    monkeypatch.setattr(service, "_load_structure", fake_load_structure)
-    _FakeChromeSession.last_calls = []
-    fake_session = _FakeChromeSession()
-
-    @asynccontextmanager
-    async def fake_shared_session():
-        yield fake_session
-
     monkeypatch.setattr(
-        "services.dingtalk_visit_writeback._shared_chrome_dingtalk_session",
-        fake_shared_session,
+        "services.dingtalk_visit_writeback._resolve_dws_cli_path",
+        lambda _s: "/usr/local/bin/dws",
     )
+    context = _build_context().model_copy(update={"source_row_id": None})
 
-    first = _build_context()
-    second = _build_context().model_copy(update={"source_row_id": "visit-row-002"})
-
-    asyncio.run(
+    result = asyncio.run(
         service.write_visit_link(
-            context=first,
+            context=context,
             final_link="https://pts.chaitin.net/return-visit/detail/visit-1",
         )
     )
-    asyncio.run(
+
+    assert result["status"] == "skipped"
+    assert result["writeback_mode"] == "disabled"
+
+
+def test_dingtalk_proactive_writeback_uses_dws_cli(monkeypatch) -> None:
+    """超半年主动回访模块使用 DWS CLI 写入时，选择正确的 base/table/field。"""
+    service = DingtalkVisitWritebackService()
+    monkeypatch.setattr(
+        "services.dingtalk_visit_writeback._resolve_dws_cli_path",
+        lambda _s: "/usr/local/bin/dws",
+    )
+
+    captured_cmds: list[list[str]] = []
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = json.dumps({
+        "status": "success",
+        "data": {"recordIds": ["proactive-row-001"]},
+    })
+    fake_result.stderr = ""
+
+    def capture_run(cmd):
+        captured_cmds.append(cmd)
+        return fake_result
+
+    monkeypatch.setattr(
+        "services.dingtalk_visit_writeback._run_subprocess",
+        capture_run,
+    )
+
+    result = asyncio.run(
         service.write_visit_link(
-            context=second,
-            final_link="https://pts.chaitin.net/return-visit/detail/visit-2",
+            context=_build_proactive_context(),
+            final_link="https://pts.chaitin.net/return-visit/detail/proactive-1",
         )
     )
 
-    open_calls = [call for call in _FakeChromeSession.last_calls if call[0] == "open_url"]
-    assert len(open_calls) == 2
-    assert open_calls[0][1][0] == open_calls[1][1][0]
+    assert result["status"] == "success"
+    assert result["writeback_mode"] == "dws_cli"
+    assert result["source_row_id"] == "proactive-row-001"
+    assert result["field_id"] == "vxfqjxrfpcm57vc1rlbu4"  # proactive 的 field-id
+    # 验证 DWS CLI 使用了正确的 proactive 配置
+    assert len(captured_cmds) == 1
+    cmd = captured_cmds[0]
+    # base-id 应为 proactive 的
+    assert "KGZLxjv9VG37XNDXS45epDXYV6EDybno" in cmd
+    # table-id 应为 proactive 的
+    assert "Z991EZV" in cmd
+    # records 里应包含 proactive 的 field-id
+    records_json = cmd[cmd.index("--records") + 1]
+    assert "vxfqjxrfpcm57vc1rlbu4" in records_json

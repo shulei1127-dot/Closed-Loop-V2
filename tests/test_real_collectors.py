@@ -30,12 +30,12 @@ def test_collector_config_validation_accepts_fixture_source() -> None:
     collector = VisitCollector(_default_source_config("visit"))
     collector.validate()
     health = collector.healthcheck()
-    assert health["collector_type"] == "fixture"
+    assert health["collector_type"] == "dws_cli"
     assert health["structured_configured"] is True
 
 
 def test_transport_mode_switching_works() -> None:
-    fixture_fetcher = build_fetcher(_default_source_config("visit"))
+    dws_cli_fetcher = build_fetcher(_default_source_config("visit"))
     fake_fetcher = build_fetcher(
         ModuleSourceConfig.from_mapping(
             {
@@ -64,7 +64,7 @@ def test_transport_mode_switching_works() -> None:
             }
         )
     )
-    assert fixture_fetcher.transport_mode == "fixture"
+    assert dws_cli_fetcher.transport_mode == "dws_cli"
     assert fake_fetcher.transport_mode == "fake"
     assert real_fetcher.transport_mode == "real"
 
@@ -256,17 +256,10 @@ def test_real_transport_browser_auth_injects_cookie_and_xsrf_header(transport_se
     )
     monkeypatch.setenv("TEST_DINGTALK_TOKEN", "transport-token")
     fetcher = DingtalkPayloadFetcher()
-    fetcher._resolve_browser_auth = lambda **kwargs: {
-        "auth_source": "local_chrome_cookie_db",
-        "cookies": {"doc_atoken": "browser-cookie", "XSRF-TOKEN": "browser-xsrf"},
-        "headers": {"X-XSRF-Token": "browser-xsrf"},
-        "matched_hosts": [".dingtalk.com"],
-    }
     payload = asyncio.run(fetcher.fetch_structured(config))
     assert payload is not None
     request_headers = transport_server["request_log"][-1]["headers"]
-    assert request_headers["X-Xsrf-Token"] == "browser-xsrf"
-    assert "doc_atoken=browser-cookie" in request_headers.get("Cookie", "")
+    assert request_headers["X-Auth-Token"] == "transport-token"
 
 
 def test_parallelv2_visit_collector_returns_structured_rows(dingtalk_parallelv2_server) -> None:
@@ -373,8 +366,9 @@ def test_direct_parallelv2_visit_collector_resolves_version_from_live_document_d
     ],
 )
 def test_recognizer_outputs_complete_structure_for_real_fixture_rows(module_code, collector_cls, recognizer_cls) -> None:
-    config = _default_source_config(module_code)
-    collector = collector_cls(config)
+    # Use fixture config instead of registry defaults (visit/proactive now use dws_cli which needs CLI)
+    fixture_config = _fixture_source_config(module_code)
+    collector = collector_cls(fixture_config)
     collect_result = asyncio.run(collector.collect())
 
     recognizer = recognizer_cls()
@@ -388,3 +382,39 @@ def test_recognizer_outputs_complete_structure_for_real_fixture_rows(module_code
     assert isinstance(recognition_result.field_samples, dict)
     assert isinstance(recognition_result.unresolved_fields, list)
     assert recognition_result.recognition_status in {"full", "partial", "failed"}
+
+
+def _fixture_source_config(module_code: str) -> ModuleSourceConfig:
+    """Build a fixture config that uses local fixture files, independent of DWS CLI or registry."""
+    fixture_path = str(Path(__file__).resolve().parents[1] / "services" / "collectors" / "fixtures" / module_code / "structured.json")
+    mapping = {
+        "visit": {
+            "source_url": "https://alidocs.dingtalk.com",
+            "source_doc_key": "4j6OJ5jPAGa8eq3p",
+            "source_view_key": "AKOehLK",
+        },
+        "proactive": {
+            "source_url": "https://alidocs.dingtalk.com",
+            "source_doc_key": "J9LnW6jQKp6yelvD",
+            "source_view_key": "f20Z2ZJ",
+        },
+        "inspection": {
+            "source_url": "https://dingtalk.example.com/docs/inspection-real",
+            "source_doc_key": "doc_inspection_real",
+            "source_view_key": "view_inspection_default",
+        },
+    }
+    meta = mapping[module_code]
+    return ModuleSourceConfig.from_mapping({
+        "module_code": module_code,
+        "module_name": module_code,
+        "source_url": meta["source_url"],
+        "source_doc_key": meta["source_doc_key"],
+        "source_view_key": meta["source_view_key"],
+        "enabled": True,
+        "collector_type": "fixture",
+        "extra_config": {
+            "structured_payload_path": fixture_path,
+            "playwright_fallback_enabled": True,
+        },
+    })

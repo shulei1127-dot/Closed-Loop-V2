@@ -15,11 +15,15 @@ class Settings(BaseSettings):
     dingtalk_default_headers_json: str = "{}"
     dingtalk_default_cookies_json: str = "{}"
     dingtalk_auth_token: str = ""
-    dingtalk_browser_auth_enabled: bool = True
     dingtalk_request_timeout_seconds: float = 15.0
     dingtalk_verify_ssl: bool = True
     pts_base_url: str = "https://pts.chaitin.net"
     pts_cookie_header: str = ""
+    pts_api_token: str = ""  # PTS API 令牌（Bearer 认证），全局默认，各模块可单独覆盖
+    pts_visit_api_token: str = ""  # 交付转售后回访 + 超半年主动回访工单闭环，空则回退到 pts_api_token
+    pts_proactive_tag_mark_api_token: str = ""  # 超半年主动回访项目打标签，空则回退到 pts_api_token
+    pts_review_api_token: str = ""  # 交付转售后审核，空则回退到 pts_api_token
+    pts_api_base_url: str = "http://api.in.chaitin.net"  # PTS 内网 API 地址，Bearer token 认证时使用
     pts_verify_ssl: bool = True
     pts_execution_transport: str = "auto"
     pts_direct_http_enabled: bool = True
@@ -42,30 +46,13 @@ class Settings(BaseSettings):
     visit_real_timeout_seconds: float = 15.0
     visit_real_verify_ssl: bool = True
     visit_prefer_direct_mode: bool = True
-    visit_browser_fallback_enabled: bool = False
     visit_writeback_enabled: bool = False
-    task_dispatcher_worker_count: int = 4
-    inspection_real_execution_enabled: bool = False
-    inspection_real_base_url: str = ""
-    inspection_real_token: str = ""
-    inspection_real_token_header: str = "X-Inspection-Token"
-    inspection_real_assign_endpoint_template: str = "/inspection-work-orders/{work_order_id}/assign-owner"
-    inspection_real_add_member_endpoint_template: str = "/inspection-work-orders/{work_order_id}/add-member"
-    inspection_real_upload_endpoint_template: str = "/inspection-work-orders/{work_order_id}/upload-reports"
-    inspection_real_complete_endpoint_template: str = "/inspection-work-orders/{work_order_id}/complete"
-    inspection_real_final_link_path: str = "data.final_link"
-    inspection_real_timeout_seconds: float = 15.0
-    inspection_real_verify_ssl: bool = True
-    inspection_upload_via_frontend_enabled: bool = True
-    inspection_add_work_order_info_enabled: bool = True
-    inspection_sync_stage_correction_enabled: bool = False
-    inspection_deadline_reminder_enabled: bool = False
-    inspection_deadline_reminder_cron: str = "0 9 * * *"
-    inspection_deadline_reminder_query_limit: int = 500
-    inspection_deadline_reminder_dingtalk_webhook: str = ""
-    inspection_deadline_reminder_dingtalk_secret: str = ""
-    inspection_deadline_reminder_dingtalk_timeout_seconds: float = 10.0
-    inspection_deadline_reminder_query_payload_json: str = ""
+    visit_writeback_dws_cli_path: str = ""  # DWS CLI 路径，为空则自动检测
+    dws_cli_path: str = ""  # DWS CLI 路径（数据采集），为空则自动检测
+    dws_cli_timeout_seconds: float = 60.0  # DWS CLI 子进程超时
+    dws_cli_page_size: int = 100  # 每页查询记录数
+    visit_writeback_aitable_base_id: str = "o14dA3GK8g5LavPaT7dDQqoxV9ekBD76"
+    task_dispatcher_worker_count: int = 1
     scheduler_summary_dingtalk_webhook: str = ""
     scheduler_summary_dingtalk_secret: str = ""
     scheduler_summary_dingtalk_timeout_seconds: float = 10.0
@@ -79,11 +66,34 @@ class Settings(BaseSettings):
     proactive_real_final_link_path: str = "data.final_link"
     proactive_real_timeout_seconds: float = 15.0
     proactive_real_verify_ssl: bool = True
-    inspection_report_root: str = "/Users/shulei/Downloads/巡检报告集合-已审核"
     sync_retry_max_attempts: int = 2
     execute_retry_max_attempts: int = 2
     task_plan_latest_by_sql_enabled: bool = True
     ops_read_cache_ttl_seconds: float = 3.0
+
+    # Visit pipeline (sync + execute + writeback)
+    visit_pipeline_enabled: bool = False
+    visit_pipeline_cron: str = "0 17 * * *"
+
+    # Proactive pipeline (sync + execute + writeback)
+    proactive_pipeline_enabled: bool = False
+    proactive_pipeline_cron: str = "0 18 * * *"
+    proactive_writeback_enabled: bool = False
+
+    # Review pipeline (sync + audit + writeback)
+    review_real_execution_enabled: bool = False
+    review_writeback_enabled: bool = False
+    review_pipeline_enabled: bool = False
+    review_pipeline_cron: str = "0 16 * * *"
+    pts_review_after_sale_filter_ids: str = ""  # 售后负责人 PTS 用户 ID 过滤，逗号分隔；为空则不过滤
+
+    # Proactive tag mark pipeline (sync + tag mark + writeback), every 15 days
+    proactive_tag_mark_pipeline_enabled: bool = False
+    proactive_tag_mark_pipeline_cron: str = "0 10 16,28 * *"
+
+    # 19:00 回访工单自动闭环 (visit + proactive), daily 19:00
+    combined_pipeline_enabled: bool = False
+    combined_pipeline_cron: str = "0 19 * * *"
 
     model_config = SettingsConfigDict(
         env_file=".env",

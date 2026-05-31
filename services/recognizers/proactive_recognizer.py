@@ -39,6 +39,11 @@ def _extract_mention_name(value):
         candidate = value.get(key)
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
+    # DWS CLI returns {"corpId": "...", "userId": "lei.shu"} without name fields
+    # Extract userId as fallback (e.g. "lei.shu" → "Lei Shu")
+    user_id = value.get("userId")
+    if isinstance(user_id, str) and user_id.strip():
+        return _format_user_id(user_id.strip())
     nested_data = value.get("data")
     if isinstance(nested_data, str) and nested_data.strip().startswith(("{", "[")):
         try:
@@ -48,6 +53,20 @@ def _extract_mention_name(value):
     if isinstance(nested_data, dict):
         return _extract_mention_name(nested_data)
     return None
+
+
+def _format_user_id(user_id: str) -> str:
+    """Convert dingtalk userId like 'lei.shu' or 'min.zhang01' to readable name."""
+    # userId format: "firstname.lastname" or "firstname.lastname01"
+    # Convert dot-separated parts, capitalize first letter, strip numeric suffix
+    parts = user_id.split(".")
+    formatted_parts = []
+    for part in parts:
+        # Strip trailing digits (e.g. "zhang01" → "zhang")
+        stripped = part.rstrip("0123456789")
+        if stripped:
+            formatted_parts.append(stripped.capitalize())
+    return " ".join(formatted_parts) if formatted_parts else user_id
 
 
 def _normalize_visit_link(value):
@@ -90,6 +109,8 @@ FIELD_SPECS = {
             "建联完成": "已建联",
             "未建联": "未建联",
             "未联系": "未建联",
+            "不用回访": "不用回访",
+            "售后断联": "售后断联",
         },
     ),
     "visit_link": FieldSpec(

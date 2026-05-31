@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 from core.config import Settings
 from services.dingtalk_visit_writeback import DingtalkVisitWritebackService
 from services.recognizers.visit_delivery_backfill import (
-    _find_local_chrome_user_data_dir,
     strip_url_fragment,
 )
 from services.executors.runner_contract import (
@@ -96,436 +95,6 @@ class _PtsRunnerError(Exception):
         self.http_status = http_status
 
 
-class _PtsBrowserSession:
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-        self._current_project_url: str | None = None
-
-    async def __aenter__(self) -> "_PtsBrowserSession":
-        if _find_local_chrome_user_data_dir() is None:
-            raise _PtsRunnerError(
-                error_message="未找到本机 Chrome 登录会话，请先登录 PTS",
-                error_type="session_expired",
-                retryable=False,
-            )
-        running = await self._run_applescript(
-            """
-            tell application "Google Chrome"
-              return running
-            end tell
-            """
-        )
-        if str(running).strip().lower() != "true":
-            raise _PtsRunnerError(
-                error_message="请先打开 Google Chrome 并登录 PTS",
-                error_type="session_expired",
-                retryable=False,
-            )
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        return None
-
-    async def open_project(self, target: str) -> dict[str, Any]:
-        normalized_target = strip_url_fragment(target)
-        try:
-            final_url = await self._run_applescript(
-                f'''
-                tell application "Google Chrome"
-                  activate
-                  set targetUrl to {json.dumps(normalized_target)}
-                  if (count of windows) = 0 then make new window
-                  set matchedWindowIndex to 0
-                  set matchedTabIndex to 0
-                  repeat with windowIndex from 1 to count of windows
-                    tell window windowIndex
-                      repeat with tabIndex from 1 to count of tabs
-                        set currentUrl to URL of tab tabIndex
-                        if currentUrl contains "pts.chaitin.net/project/" then
-                          set matchedWindowIndex to windowIndex
-                          set matchedTabIndex to tabIndex
-                          exit repeat
-                        end if
-                      end repeat
-                    end tell
-                    if matchedWindowIndex is not 0 then exit repeat
-                  end repeat
-                  if matchedWindowIndex is 0 then
-                    tell front window
-                      make new tab with properties {{URL:targetUrl}}
-                      set active tab index to (count of tabs)
-                    end tell
-                  else
-                    set index of window matchedWindowIndex to 1
-                    tell front window
-                      set active tab index to matchedTabIndex
-                      set URL of active tab to targetUrl
-                    end tell
-                  end if
-                  delay 2
-                  return URL of active tab of front window
-                end tell
-                '''
-            )
-        except _PtsRunnerError:
-            raise
-        except Exception:
-            return {
-                "action": "open_pts_delivery_link",
-                "status": "failed",
-                "target": target,
-                "error_type": "timeout",
-                "error_message": "打开 PTS 链接超时",
-                "retryable": True,
-            }
-        if "auth.chaitin.net/login" in str(final_url):
-            return {
-                "action": "open_pts_delivery_link",
-                "status": "failed",
-                "target": target,
-                "error_type": "session_expired",
-                "error_message": "PTS 会话已失效，请重新登录 PTS 或更新 Cookie",
-                "retryable": False,
-            }
-        self._current_project_url = normalized_target
-        return {
-            "action": "open_pts_delivery_link",
-            "status": "success",
-            "target": target,
-            "http_status": 200,
-        }
-
-    async def graphql(self, query: str) -> dict[str, Any]:
-        return await self.graphql_payload({"query": query})
-
-    async def graphql_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        encoded_payload = json.dumps(payload, ensure_ascii=False)
-        js = (
-            "var xhr=new XMLHttpRequest();"
-            "xhr.open('POST','/query',false);"
-            "xhr.withCredentials=true;"
-            "xhr.setRequestHeader('Content-Type','application/json');"
-            "xhr.setRequestHeader('Accept','*/*');"
-            f"try{{xhr.send({json.dumps(encoded_payload, ensure_ascii=False)});"
-            "JSON.stringify({status:xhr.status,responseURL:(xhr.responseURL||''),text:xhr.responseText,url:window.location.href});}"
-            "catch(e){JSON.stringify({status:0,error:String(e),url:window.location.href});}"
-        )
-        if self._current_project_url:
-            raw_result = await self.execute_js_on_project(self._current_project_url, js)
-        else:
-            raw_result = await self.execute_js(js)
-        if isinstance(raw_result, dict):
-            result = raw_result
-        else:
-            try:
-                result = json.loads(str(raw_result or "{}"))
-            except json.JSONDecodeError as exc:
-                raise _PtsRunnerError(
-                    error_message="Chrome 会话执行返回非法结果",
-                    error_type="response_invalid",
-                    retryable=False,
-                ) from exc
-        status = int(result.get("status") or 0)
-        url = str(result.get("url") or "")
-        response_url = str(result.get("responseURL") or "")
-        text = str(result.get("text") or "")
-        if "auth.chaitin.net/login" in url or "auth.chaitin.net/login" in response_url or status in {401, 403}:
-            raise _PtsRunnerError(
-                error_message="PTS 会话已失效，请重新登录 PTS 或更新 Cookie",
-                error_type="session_expired",
-                retryable=False,
-                http_status=status or None,
-            )
-        if status >= 400:
-            raise _PtsRunnerError(
-                error_message=f"PTS GraphQL 请求失败: {status}",
-                error_type="http_error" if status >= 500 else "business_rejected",
-                retryable=status >= 500,
-                http_status=status,
-            )
-        try:
-            payload = json.loads(text)
-        except ValueError as exc:
-            raise _PtsRunnerError(
-                error_message="PTS GraphQL 返回非法 JSON",
-                error_type="response_invalid",
-                retryable=False,
-            ) from exc
-        errors = payload.get("errors") or []
-        if errors:
-            message = errors[0].get("message") or "PTS GraphQL 返回错误"
-            raise _PtsRunnerError(
-                error_message=str(message),
-                error_type="business_rejected",
-                retryable=False,
-            )
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            raise _PtsRunnerError(
-                error_message="PTS GraphQL 缺少 data 字段",
-                error_type="response_invalid",
-                retryable=False,
-            )
-        return data
-
-    async def read_page_text(self, *, limit: int = 4000) -> str:
-        js = f"document.body ? document.body.innerText.slice(0,{int(limit)}) : ''"
-        return await self._run_applescript(
-            f'''
-            tell application "Google Chrome"
-              return execute active tab of front window javascript {json.dumps(js)}
-            end tell
-            '''
-        )
-
-    async def execute_js(self, script: str) -> Any:
-        raw = await self._run_applescript(
-            f'''
-            tell application "Google Chrome"
-              return execute active tab of front window javascript {json.dumps(script, ensure_ascii=False)}
-            end tell
-            '''
-        )
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return raw
-
-    async def execute_js_on_project(self, target: str, script: str) -> Any:
-        normalized_target = strip_url_fragment(target)
-        raw = await self._run_applescript(
-            f'''
-            tell application "Google Chrome"
-              activate
-              set targetUrl to {json.dumps(normalized_target)}
-              if (count of windows) = 0 then make new window
-              set matchedWindowIndex to 0
-              set matchedTabIndex to 0
-              repeat with windowIndex from 1 to count of windows
-                tell window windowIndex
-                  repeat with tabIndex from 1 to count of tabs
-                    set currentUrl to URL of tab tabIndex
-                    if currentUrl contains targetUrl then
-                      set matchedWindowIndex to windowIndex
-                      set matchedTabIndex to tabIndex
-                      exit repeat
-                    end if
-                  end repeat
-                end tell
-                if matchedWindowIndex is not 0 then exit repeat
-              end repeat
-              if matchedWindowIndex is 0 then
-                tell front window
-                  make new tab with properties {{URL:targetUrl}}
-                  set matchedWindowIndex to 1
-                  set matchedTabIndex to (count of tabs)
-                end tell
-              end if
-              set index of window matchedWindowIndex to 1
-              tell window matchedWindowIndex
-                set active tab index to matchedTabIndex
-                set currentUrl to URL of tab matchedTabIndex
-                if currentUrl does not contain targetUrl then
-                  set URL of tab matchedTabIndex to targetUrl
-                  delay 1
-                end if
-                return execute tab matchedTabIndex javascript {json.dumps(script, ensure_ascii=False)}
-              end tell
-            end tell
-            '''
-        )
-        self._current_project_url = normalized_target
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return raw
-
-    async def execute_js_on_project_background(self, target: str, script: str) -> Any:
-        normalized_target = strip_url_fragment(target)
-        raw = await self._run_applescript(
-            f'''
-            tell application "Google Chrome"
-              set targetUrl to {json.dumps(normalized_target)}
-              if (count of windows) = 0 then make new window
-              set matchedWindowIndex to 0
-              set matchedTabIndex to 0
-              repeat with windowIndex from 1 to count of windows
-                tell window windowIndex
-                  repeat with tabIndex from 1 to count of tabs
-                    set currentUrl to URL of tab tabIndex
-                    if currentUrl contains targetUrl then
-                      set matchedWindowIndex to windowIndex
-                      set matchedTabIndex to tabIndex
-                      exit repeat
-                    end if
-                  end repeat
-                end tell
-                if matchedWindowIndex is not 0 then exit repeat
-              end repeat
-              if matchedWindowIndex is 0 then
-                tell window 1
-                  make new tab with properties {{URL:targetUrl}}
-                  set matchedWindowIndex to 1
-                  set matchedTabIndex to (count of tabs)
-                end tell
-                delay 1
-              end if
-              tell window matchedWindowIndex
-                set currentUrl to URL of tab matchedTabIndex
-                if currentUrl does not contain targetUrl then
-                  set URL of tab matchedTabIndex to targetUrl
-                  delay 1
-                end if
-                return execute tab matchedTabIndex javascript {json.dumps(script, ensure_ascii=False)}
-              end tell
-            end tell
-            '''
-        )
-        self._current_project_url = normalized_target
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return raw
-
-    async def send_key_code(self, key_code: int) -> None:
-        await self._run_applescript(
-            f'''
-            tell application "Google Chrome" to activate
-            tell application "System Events"
-              key code {key_code}
-            end tell
-            '''
-        )
-
-    async def send_key_code_repeated(self, key_code: int, count: int) -> None:
-        count = max(1, int(count))
-        await self._run_applescript(
-            f'''
-            tell application "Google Chrome" to activate
-            tell application "System Events"
-              repeat {count} times
-                key code {key_code}
-                delay 0.03
-              end repeat
-            end tell
-            '''
-        )
-
-    async def trigger_frontend_file_upload_dialog(self, target: str) -> dict[str, Any]:
-        normalized_target = strip_url_fragment(target)
-        script = """
-        (() => {
-          const toResult = (status, detail) => JSON.stringify({ status, ...detail });
-          const keywords = ["上传文件", "上传附件", "上传", "附件"];
-          const textOf = (el) => (el && (el.innerText || el.textContent || "") || "").trim();
-          const candidates = Array.from(
-            document.querySelectorAll(
-              'button, [role="button"], .ant-btn, .ant-upload, .ant-upload-text, .ant-upload-select, a, span'
-            )
-          );
-          for (const el of candidates) {
-            const txt = textOf(el);
-            if (!txt) continue;
-            if (keywords.some((k) => txt.includes(k))) {
-              try {
-                el.click();
-                return toResult("success", { trigger: "click_text", text: txt });
-              } catch (e) {
-                return toResult("failed", { trigger: "click_text", text: txt, error: String(e) });
-              }
-            }
-          }
-          const input = document.querySelector('input[type="file"]');
-          if (input) {
-            try {
-              input.click();
-              return toResult("success", { trigger: "input_click", text: "input[type=file]" });
-            } catch (e) {
-              return toResult("failed", { trigger: "input_click", text: "input[type=file]", error: String(e) });
-            }
-          }
-          return toResult("failed", { trigger: "none", error: "未找到上传入口" });
-        })()
-        """
-        result = await self.execute_js_on_project(normalized_target, script)
-        if not isinstance(result, dict):
-            return {
-                "action": "trigger_frontend_upload_dialog",
-                "status": "failed",
-                "error_type": "response_invalid",
-                "error_message": "触发 PTS 前端上传窗口失败：返回结果无效",
-                "retryable": False,
-            }
-        status = str(result.get("status") or "").strip()
-        if status == "success":
-            return {
-                "action": "trigger_frontend_upload_dialog",
-                "status": "success",
-                "trigger": str(result.get("trigger") or ""),
-                "trigger_text": str(result.get("text") or ""),
-            }
-        return {
-            "action": "trigger_frontend_upload_dialog",
-            "status": "failed",
-            "error_type": "response_invalid",
-            "error_message": (
-                f"触发 PTS 前端上传窗口失败: trigger={result.get('trigger')}; "
-                f"detail={result.get('error') or result.get('text') or 'unknown'}"
-            ),
-            "retryable": False,
-        }
-
-    async def choose_file_in_dialog(self, file_path: str) -> dict[str, Any]:
-        # macOS file picker: Cmd+Shift+G -> paste full path -> Enter -> Enter
-        try:
-            await self._run_applescript(
-                f'''
-                tell application "Google Chrome" to activate
-                delay 0.08
-                tell application "System Events"
-                  keystroke "G" using {{command down, shift down}}
-                  delay 0.16
-                  keystroke {json.dumps(file_path)}
-                  delay 0.08
-                  key code 36
-                  delay 0.08
-                  key code 36
-                end tell
-                '''
-            )
-            return {
-                "action": "choose_file_in_dialog",
-                "status": "success",
-                "file_path": file_path,
-            }
-        except _PtsRunnerError as exc:
-            return {
-                "action": "choose_file_in_dialog",
-                "status": "failed",
-                "file_path": file_path,
-                "error_type": exc.error_type,
-                "error_message": exc.error_message,
-                "retryable": exc.retryable,
-            }
-
-    async def _run_applescript(self, script: str) -> str:
-        def _invoke() -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                ["osascript", "-"],
-                input=script,
-                text=True,
-                capture_output=True,
-            )
-
-        result = await asyncio.to_thread(_invoke)
-        if result.returncode != 0:
-            raise _PtsRunnerError(
-                error_message="无法驱动本机 Chrome 会话，请检查浏览器自动化权限",
-                error_type="unknown_error",
-                retryable=False,
-            )
-        return result.stdout.strip()
-
 
 class VisitRealRunner:
     def __init__(
@@ -533,9 +102,15 @@ class VisitRealRunner:
         settings: Settings,
         *,
         writeback_service: DingtalkVisitWritebackService | None = None,
+        api_token_override: str | None = None,
     ) -> None:
         self.settings = settings
+        self._api_token_override = api_token_override
         self.writeback_service = writeback_service or DingtalkVisitWritebackService(settings)
+
+    @property
+    def _effective_api_token(self) -> str:
+        return self._api_token_override or self.settings.pts_visit_api_token or self._effective_api_token
 
     def validate(self) -> tuple[bool, dict[str, Any], str | None]:
         diagnostics = self._base_diagnostics()
@@ -563,7 +138,6 @@ class VisitRealRunner:
             if (
                 not self._can_use_browser_profile_transport()
                 and not self._can_use_direct_http_transport()
-                and not self._can_use_legacy_browser_session_transport()
             ):
                 missing_fields.append("pts_cookie_header")
         apply_validation_result(diagnostics, missing_fields)
@@ -584,7 +158,8 @@ class VisitRealRunner:
         if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode:
             return await self._run_legacy_api_mode(context, actions, diagnostics)
 
-        if self._can_use_browser_profile_transport():
+        # cookie_direct 模式下跳过浏览器 profile，直接用 HTTP
+        if self._browser_fallback_allowed() and self._can_use_browser_profile_transport():
             profile_outcome = await self._run_pts_browser_profile_mode(context, actions, diagnostics)
             if profile_outcome.run_status in {"success", "pending_confirmation"}:
                 return profile_outcome
@@ -596,33 +171,13 @@ class VisitRealRunner:
             direct_diagnostics["fallback_reason"] = (profile_outcome.runner_diagnostics or {}).get("error_type")
             return await self._run_pts_direct_mode(context, actions, direct_diagnostics)
 
-        if not self._can_use_direct_http_transport() and self._can_use_legacy_browser_session_transport():
-            browser_diagnostics = self._base_diagnostics(transport_override="pts_browser_session")
-            return await self._run_pts_browser_mode(context, actions, browser_diagnostics)
-
-        direct_outcome = await self._run_pts_direct_mode(context, actions, diagnostics)
-        if direct_outcome.run_status in {"success", "pending_confirmation"}:
-            return direct_outcome
-        if not self.settings.visit_browser_fallback_enabled:
-            return direct_outcome
-        if not self._browser_session_available():
-            return direct_outcome
-        if not self._can_fallback_from_direct(direct_outcome):
-            return direct_outcome
-
-        fallback_diagnostics = self._base_diagnostics()
-        fallback_diagnostics["fallback_from"] = "pts_direct"
-        fallback_diagnostics["transport_mode"] = "pts_browser_session"
-        fallback_diagnostics["fallback_reason"] = (direct_outcome.runner_diagnostics or {}).get("error_type")
-        return await self._run_pts_browser_mode(context, actions, fallback_diagnostics)
+        return await self._run_pts_direct_mode(context, actions, diagnostics)
 
     def _use_legacy_api_mode(self) -> bool:
         return bool(self.settings.visit_real_base_url and self.settings.visit_real_token)
 
     def _browser_session_available(self) -> bool:
-        if self._can_use_browser_profile_transport():
-            return True
-        return _find_local_chrome_user_data_dir() is not None
+        return self._can_use_browser_profile_transport()
 
     def _can_use_browser_profile_transport(self) -> bool:
         return bool(self.settings.pts_base_url) and pts_browser_profile_configured(self.settings)
@@ -630,12 +185,14 @@ class VisitRealRunner:
     def _can_use_direct_http_transport(self) -> bool:
         return bool(
             self.settings.pts_base_url
-            and self.settings.pts_cookie_header
+            and (self.settings.pts_cookie_header or self._effective_api_token)
             and pts_direct_http_enabled(self.settings)
         )
 
-    def _can_use_legacy_browser_session_transport(self) -> bool:
-        return bool(self.settings.pts_base_url and self._browser_session_available())
+    def _browser_fallback_allowed(self) -> bool:
+        """cookie_direct 模式下禁止回退到浏览器操作。"""
+        transport = str(getattr(self.settings, "pts_execution_transport", "auto") or "auto").strip().lower()
+        return transport != "cookie_direct"
 
     @staticmethod
     def _can_fallback_from_direct(outcome: VisitRealRunOutcome) -> bool:
@@ -651,136 +208,51 @@ class VisitRealRunner:
         action_results: list[dict[str, Any]] = []
         runtime = _PtsVisitRuntime()
 
+        # 当使用 API token 时，走内网 API 地址；否则走外网 PTS 地址
+        api_base_url = (
+            self.settings.pts_api_base_url
+            if self._effective_api_token
+            else self.settings.pts_base_url
+        )
+
         try:
-            async with httpx.AsyncClient(
-                base_url=self.settings.pts_base_url,
-                timeout=self.settings.visit_real_timeout_seconds,
-                verify=self.settings.pts_verify_ssl,
-                follow_redirects=True,
-                headers=self._pts_headers(),
-            ) as client:
-                open_result = normalize_action_result(await self._open_pts_link(context, actions[0]))
-                action_results.append(open_result)
-                if open_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=open_result,
-                        fallback_message="打开 PTS 链接失败",
-                    )
-
-                create_result = normalize_action_result(
-                    await self._create_visit_work_order_pts(
-                        query_func=lambda query: self._pts_graphql(client, query),
+            result = await self._execute_pts_direct_actions(
+                context=context,
+                actions=actions,
+                diagnostics=diagnostics,
+                api_base_url=api_base_url,
+                action_results=action_results,
+                runtime=runtime,
+            )
+            return result
+        except httpx.ConnectError as exc:
+            # 内网 API 地址不可达时，回退到外网 PTS 地址 + cookie 认证
+            if api_base_url == self.settings.pts_api_base_url and self.settings.pts_cookie_header:
+                diagnostics["fallback_reason"] = f"内网 API ({api_base_url}) 不可达，回退到外网 PTS"
+                diagnostics["fallback_original_error"] = str(exc)
+                fallback_base_url = self.settings.pts_base_url
+                action_results.clear()
+                try:
+                    return await self._execute_pts_direct_actions(
                         context=context,
-                        action=actions[1],
-                        owner_action=actions[2],
+                        actions=actions,
+                        diagnostics=diagnostics,
+                        api_base_url=fallback_base_url,
+                        action_results=action_results,
                         runtime=runtime,
                     )
-                )
-                action_results.append(create_result)
-                if create_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=create_result,
-                        fallback_message="创建回访工单失败",
-                    )
-
-                assign_result = normalize_action_result(await self._assign_owner_direct(actions[2], runtime))
-                action_results.append(assign_result)
-                if assign_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=assign_result,
-                        fallback_message="指派负责人失败",
-                    )
-
-                mark_target_result = normalize_action_result(
-                    await self._mark_visit_target_direct(actions[3], runtime)
-                )
-                action_results.append(mark_target_result)
-                if mark_target_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=mark_target_result,
-                        fallback_message="标记回访对象失败",
-                    )
-
-                fill_feedback_result = normalize_action_result(
-                    await self._fill_feedback_pts(
-                        query_func=lambda query: self._pts_graphql(client, query),
-                        context=context,
-                        action=actions[4],
-                        runtime=runtime,
-                    )
-                )
-                action_results.append(fill_feedback_result)
-                if fill_feedback_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=fill_feedback_result,
-                        fallback_message="填写反馈失败",
-                    )
-
-                complete_result = normalize_action_result(
-                    await self._complete_visit_pts(
-                        query_func=lambda query: self._pts_graphql(client, query),
-                        runtime=runtime,
-                    )
-                )
-                action_results.append(complete_result)
-                if complete_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=complete_result,
-                        fallback_message="完成回访失败",
-                    )
-
-                postcheck_result = normalize_action_result(
-                    await self._postcheck_visit_closure(
-                        query_func=lambda query: self._pts_graphql(client, query),
-                        context=context,
-                        runtime=runtime,
-                    )
-                )
-                action_results.append(postcheck_result)
-                diagnostics["postcheck"] = self._extract_visit_postcheck_summary(postcheck_result)
-                if postcheck_result["status"] == "failed":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=postcheck_result,
-                        fallback_message="回访工单 post-check 未通过",
-                        final_link=runtime.final_link,
-                    )
-                if postcheck_result["status"] == "pending_confirmation":
-                    return self._pending_confirmation_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=postcheck_result,
-                        fallback_message="回访工单状态暂时无法确认，请稍后同步确认",
-                        final_link=runtime.final_link,
-                    )
-
-                writeback_result = await self._run_writeback(context, runtime.final_link)
-                if writeback_result is not None:
-                    action_results.append(normalize_action_result(writeback_result))
-                    diagnostics["writeback"] = {"enabled": True, "status": writeback_result.get("status")}
-
-                action_results = refresh_runner_diagnostics(diagnostics, action_results)
-                mark_runner_success(diagnostics)
-                return VisitRealRunOutcome(
-                    run_status="success",
-                    final_link=runtime.final_link,
-                    retryable=False,
-                    action_results=action_results,
-                    runner_diagnostics=diagnostics,
-                )
+                except httpx.HTTPError:
+                    pass  # fall through to the generic handler below
+            # 如果回退也失败，或没有 cookie 可回退，走通用错误处理
+            action_results = refresh_runner_diagnostics(diagnostics, action_results)
+            mark_runner_failure(diagnostics, error_type="http_error", last_error=str(exc))
+            return VisitRealRunOutcome(
+                run_status="failed",
+                error_message="visit real runner 请求失败",
+                retryable=True,
+                action_results=action_results,
+                runner_diagnostics=diagnostics,
+            )
         except httpx.TimeoutException as exc:
             action_results = refresh_runner_diagnostics(diagnostics, action_results)
             mark_runner_failure(diagnostics, error_type="timeout", last_error=str(exc))
@@ -802,151 +274,177 @@ class VisitRealRunner:
                 runner_diagnostics=diagnostics,
             )
 
-    async def _run_pts_browser_mode(
+    async def _execute_pts_direct_actions(
         self,
+        *,
         context: ExecutorContext,
         actions: list[dict[str, Any]],
         diagnostics: dict[str, Any],
+        api_base_url: str,
+        action_results: list[dict[str, Any]],
+        runtime: _PtsVisitRuntime,
     ) -> VisitRealRunOutcome:
-        action_results: list[dict[str, Any]] = []
-        runtime = _PtsVisitRuntime()
-        diagnostics["transport_mode"] = "pts_browser_session"
-        try:
-            async with _PtsBrowserSession(self.settings) as browser:
-                open_result = normalize_action_result(await browser.open_project(actions[0].get("target") or context.normalized_data.get("pts_link")))
-                action_results.append(open_result)
-                if open_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=open_result,
-                        fallback_message="打开 PTS 链接失败",
-                    )
-
-                create_result = normalize_action_result(
-                    await self._create_visit_work_order_pts(
-                        query_func=browser.graphql,
-                        context=context,
-                        action=actions[1],
-                        owner_action=actions[2],
-                        runtime=runtime,
-                    )
-                )
-                action_results.append(create_result)
-                if create_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=create_result,
-                        fallback_message="创建回访工单失败",
-                    )
-
-                assign_result = normalize_action_result(await self._assign_owner_direct(actions[2], runtime))
-                action_results.append(assign_result)
-                if assign_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=assign_result,
-                        fallback_message="指派负责人失败",
-                    )
-
-                mark_target_result = normalize_action_result(await self._mark_visit_target_direct(actions[3], runtime))
-                action_results.append(mark_target_result)
-                if mark_target_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=mark_target_result,
-                        fallback_message="标记回访对象失败",
-                    )
-
-                fill_feedback_result = normalize_action_result(
-                    await self._fill_feedback_pts(
-                        query_func=browser.graphql,
-                        context=context,
-                        action=actions[4],
-                        runtime=runtime,
-                    )
-                )
-                action_results.append(fill_feedback_result)
-                if fill_feedback_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=fill_feedback_result,
-                        fallback_message="填写反馈失败",
-                    )
-
-                complete_result = normalize_action_result(
-                    await self._complete_visit_pts(
-                        query_func=browser.graphql,
-                        runtime=runtime,
-                    )
-                )
-                action_results.append(complete_result)
-                if complete_result["status"] != "success":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=complete_result,
-                        fallback_message="完成回访失败",
-                    )
-
-                postcheck_result = normalize_action_result(
-                    await self._postcheck_visit_closure(
-                        query_func=browser.graphql,
-                        context=context,
-                        runtime=runtime,
-                    )
-                )
-                action_results.append(postcheck_result)
-                diagnostics["postcheck"] = self._extract_visit_postcheck_summary(postcheck_result)
-                if postcheck_result["status"] == "failed":
-                    return self._failure_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=postcheck_result,
-                        fallback_message="回访工单 post-check 未通过",
-                        final_link=runtime.final_link,
-                    )
-                if postcheck_result["status"] == "pending_confirmation":
-                    return self._pending_confirmation_outcome(
-                        diagnostics=diagnostics,
-                        action_results=action_results,
-                        action_result=postcheck_result,
-                        fallback_message="回访工单状态暂时无法确认，请稍后同步确认",
-                        final_link=runtime.final_link,
-                    )
-
-                writeback_result = await self._run_writeback(context, runtime.final_link)
-                if writeback_result is not None:
-                    action_results.append(normalize_action_result(writeback_result))
-                    diagnostics["writeback"] = {"enabled": True, "status": writeback_result.get("status")}
-
-                action_results = refresh_runner_diagnostics(diagnostics, action_results)
-                mark_runner_success(diagnostics)
-                return VisitRealRunOutcome(
-                    run_status="success",
-                    final_link=runtime.final_link,
-                    retryable=False,
-                    action_results=action_results,
-                    runner_diagnostics=diagnostics,
-                )
-        except _PtsRunnerError as exc:
-            action_results = refresh_runner_diagnostics(diagnostics, action_results)
-            mark_runner_failure(
-                diagnostics,
-                error_type=exc.error_type,
-                last_error=exc.error_message,
+        # 根据 base_url 决定认证和 transport 配置
+        use_api_token = (api_base_url == self.settings.pts_api_base_url and self._effective_api_token)
+        api_token_transport = (
+            httpx.AsyncHTTPTransport(
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
             )
+            if use_api_token
+            else None
+        )
+        # 回退到外网时使用 cookie 认证
+        headers = self._pts_headers()
+        if not use_api_token and self.settings.pts_cookie_header:
+            headers["Cookie"] = self.settings.pts_cookie_header
+            headers["Origin"] = self.settings.pts_base_url
+            headers["Referer"] = f"{self.settings.pts_base_url.rstrip('/')}/"
+            headers["User-Agent"] = "Mozilla/5.0"
+            headers.pop("Authorization", None)
+
+        async with httpx.AsyncClient(
+            base_url=api_base_url,
+            timeout=self.settings.visit_real_timeout_seconds,
+            verify=False if use_api_token else self.settings.pts_verify_ssl,
+            follow_redirects=not use_api_token,
+            headers=headers,
+            transport=api_token_transport,
+        ) as client:
+            open_result = normalize_action_result(await self._open_pts_link(context, actions[0]))
+            action_results.append(open_result)
+            if open_result["status"] != "success":
+                return self._failure_outcome(
+                    diagnostics=diagnostics,
+                    action_results=action_results,
+                    action_result=open_result,
+                    fallback_message="打开 PTS 链接失败",
+                )
+
+            create_result = normalize_action_result(
+                await self._create_visit_work_order_pts(
+                    query_func=lambda query: self._pts_graphql(client, query),
+                    context=context,
+                    action=actions[1],
+                    owner_action=actions[2],
+                    runtime=runtime,
+                )
+            )
+            action_results.append(create_result)
+            if create_result["status"] != "success":
+                return self._failure_outcome(
+                    diagnostics=diagnostics,
+                    action_results=action_results,
+                    action_result=create_result,
+                    fallback_message="创建回访工单失败",
+                )
+
+            if use_api_token:
+                await asyncio.sleep(1.5)
+
+            assign_result = normalize_action_result(await self._assign_owner_direct(actions[2], runtime))
+            action_results.append(assign_result)
+            if assign_result["status"] != "success":
+                return self._failure_outcome(
+                    diagnostics=diagnostics,
+                    action_results=action_results,
+                    action_result=assign_result,
+                    fallback_message="指派负责人失败",
+                )
+
+            mark_target_result = normalize_action_result(
+                await self._mark_visit_target_direct(actions[3], runtime)
+            )
+            action_results.append(mark_target_result)
+            if mark_target_result["status"] != "success":
+                return self._failure_outcome(
+                    diagnostics=diagnostics,
+                    action_results=action_results,
+                    action_result=mark_target_result,
+                    fallback_message="标记回访对象失败",
+                )
+
+            if use_api_token:
+                await asyncio.sleep(1.5)
+
+            fill_feedback_result = normalize_action_result(
+                await self._fill_feedback_pts(
+                    query_func=lambda query: self._pts_graphql(client, query),
+                    context=context,
+                    action=actions[4],
+                    runtime=runtime,
+                )
+            )
+            action_results.append(fill_feedback_result)
+            if fill_feedback_result["status"] != "success":
+                return self._failure_outcome(
+                    diagnostics=diagnostics,
+                    action_results=action_results,
+                    action_result=fill_feedback_result,
+                    fallback_message="填写反馈失败",
+                )
+
+            if use_api_token:
+                await asyncio.sleep(1.5)
+
+            complete_result = normalize_action_result(
+                await self._complete_visit_pts(
+                    query_func=lambda query: self._pts_graphql(client, query),
+                    runtime=runtime,
+                )
+            )
+            action_results.append(complete_result)
+            if complete_result["status"] != "success":
+                return self._failure_outcome(
+                    diagnostics=diagnostics,
+                    action_results=action_results,
+                    action_result=complete_result,
+                    fallback_message="完成回访失败",
+                )
+
+            if use_api_token:
+                await asyncio.sleep(1.5)
+
+            postcheck_result = normalize_action_result(
+                await self._postcheck_visit_closure(
+                    query_func=lambda query: self._pts_graphql(client, query),
+                    context=context,
+                    runtime=runtime,
+                )
+            )
+            action_results.append(postcheck_result)
+            diagnostics["postcheck"] = self._extract_visit_postcheck_summary(postcheck_result)
+            if postcheck_result["status"] == "failed":
+                return self._failure_outcome(
+                    diagnostics=diagnostics,
+                    action_results=action_results,
+                    action_result=postcheck_result,
+                    fallback_message="回访工单 post-check 未通过",
+                    final_link=runtime.final_link,
+                )
+            if postcheck_result["status"] == "pending_confirmation":
+                return self._pending_confirmation_outcome(
+                    diagnostics=diagnostics,
+                    action_results=action_results,
+                    action_result=postcheck_result,
+                    fallback_message="回访工单状态暂时无法确认，请稍后同步确认",
+                    final_link=runtime.final_link,
+                )
+
+            writeback_result = await self._run_writeback(context, runtime.final_link)
+            if writeback_result is not None:
+                action_results.append(normalize_action_result(writeback_result))
+                diagnostics["writeback"] = {"enabled": True, "status": writeback_result.get("status")}
+
+            action_results = refresh_runner_diagnostics(diagnostics, action_results)
+            mark_runner_success(diagnostics)
             return VisitRealRunOutcome(
-                run_status="failed",
-                error_message=exc.error_message,
-                retryable=exc.retryable,
+                run_status="success",
+                final_link=runtime.final_link,
+                retryable=False,
                 action_results=action_results,
                 runner_diagnostics=diagnostics,
             )
+
 
     async def _run_pts_browser_profile_mode(
         self,
@@ -1223,11 +721,22 @@ class VisitRealRunner:
         action: dict[str, Any],
     ) -> dict[str, Any]:
         target = action.get("target") or context.normalized_data.get("pts_link")
+        # When using API token (Bearer auth), skip web page pre-check —
+        # the token only works for GraphQL API calls, not for browsing web pages.
+        # The actual GraphQL calls will fail if the token is invalid.
+        if self._effective_api_token:
+            return {
+                "action": "open_pts_delivery_link",
+                "status": "success",
+                "target": target,
+                "http_status": None,
+                "note": "skipped_web_check_with_api_token",
+            }
         try:
             async with httpx.AsyncClient(
                 timeout=self.settings.visit_real_timeout_seconds,
                 verify=self.settings.pts_verify_ssl,
-                headers={"Cookie": self.settings.pts_cookie_header, "User-Agent": "Mozilla/5.0"},
+                headers=self._pts_headers(),
                 follow_redirects=True,
             ) as pts_client:
                 response = await pts_client.get(str(target))
@@ -1501,8 +1010,10 @@ class VisitRealRunner:
             )
 
     async def _pts_graphql(self, client: httpx.AsyncClient, query: str) -> dict[str, Any]:
+        # 内网 API 路径为 /pts/query，外网路径为 /query
+        graphql_path = "/pts/query" if self._effective_api_token else "/query"
         try:
-            response = await client.post("/query", json={"query": query})
+            response = await client.post(graphql_path, json={"query": query})
         except httpx.TimeoutException as exc:
             raise _PtsRunnerError(
                 error_message="PTS GraphQL 请求超时",
@@ -1510,17 +1021,19 @@ class VisitRealRunner:
                 retryable=True,
             ) from exc
         if _is_pts_session_expired(response):
+            auth_msg = "PTS API 令牌无效，请检查 PTS_API_TOKEN 配置" if self._effective_api_token else "PTS 会话已失效，请重新登录 PTS 或更新 Cookie"
             raise _PtsRunnerError(
-                error_message="PTS 会话已失效，请重新登录 PTS 或更新 Cookie",
+                error_message=auth_msg,
                 error_type="session_expired",
                 retryable=False,
                 http_status=response.status_code,
             )
         if response.status_code >= 400:
+            retryable = response.status_code >= 500 or response.status_code == 429
             raise _PtsRunnerError(
                 error_message=f"PTS GraphQL 请求失败: {response.status_code}",
-                error_type="http_error" if response.status_code >= 500 else "business_rejected",
-                retryable=response.status_code >= 500,
+                error_type="http_error" if retryable else "business_rejected",
+                retryable=retryable,
                 http_status=response.status_code,
             )
         try:
@@ -1799,43 +1312,36 @@ class VisitRealRunner:
             )
 
     def _pts_headers(self) -> dict[str, str]:
-        return {
-            "Cookie": self.settings.pts_cookie_header,
-            "Content-Type": "application/json",
-            "Accept": "*/*",
-            "Origin": self.settings.pts_base_url,
-            "Referer": f"{self.settings.pts_base_url.rstrip('/')}/",
-            "User-Agent": "Mozilla/5.0",
-        }
+        headers = {"Content-Type": "application/json", "Accept": "*/*"}
+        if self._effective_api_token:
+            headers["Authorization"] = f"Bearer {self._effective_api_token}"
+        elif self.settings.pts_cookie_header:
+            headers["Cookie"] = self.settings.pts_cookie_header
+            headers["Origin"] = self.settings.pts_base_url
+            headers["Referer"] = f"{self.settings.pts_base_url.rstrip('/')}/"
+            headers["User-Agent"] = "Mozilla/5.0"
+        return headers
 
     def _base_diagnostics(self, *, transport_override: str | None = None) -> dict[str, Any]:
         if self._use_legacy_api_mode() and not self.settings.visit_prefer_direct_mode:
             transport_mode = "legacy_api"
-            pts_auth_header = "Cookie"
+            pts_auth_header = "Bearer" if self._effective_api_token else "Cookie"
         elif transport_override == "pts_direct":
             transport_mode = "pts_direct"
-            pts_auth_header = "Cookie"
+            pts_auth_header = "Bearer" if self._effective_api_token else "Cookie"
         elif transport_override == "pts_browser_profile":
             transport_mode = "pts_browser_profile"
             pts_auth_header = "BrowserProfile"
-        elif transport_override == "pts_browser_session":
-            transport_mode = "pts_browser_session"
-            pts_auth_header = "ChromeProfile"
+        elif not self._browser_fallback_allowed() and self._can_use_direct_http_transport():
+            # cookie_direct 模式下，始终使用 pts_direct
+            transport_mode = "pts_direct"
+            pts_auth_header = "Bearer" if self._effective_api_token else "Cookie"
         elif self._can_use_browser_profile_transport():
             transport_mode = "pts_browser_profile"
             pts_auth_header = "BrowserProfile"
-        elif not self._can_use_direct_http_transport() and self._can_use_legacy_browser_session_transport():
-            transport_mode = "pts_browser_session"
-            pts_auth_header = "ChromeProfile"
-        elif self.settings.visit_prefer_direct_mode:
-            transport_mode = "pts_direct"
-            pts_auth_header = "Cookie"
-        elif self._browser_session_available():
-            transport_mode = "pts_browser_session"
-            pts_auth_header = "ChromeProfile"
         else:
             transport_mode = "pts_direct"
-            pts_auth_header = "Cookie"
+            pts_auth_header = "Bearer" if self._effective_api_token else "Cookie"
         return build_runner_diagnostics(
             module_code="visit",
             runner="VisitRealRunner",
@@ -2087,7 +1593,7 @@ class VisitRealRunner:
             return None
         if not final_link:
             return None
-        if context.source_collector_type not in {"dingtalk", "real"}:
+        if context.source_collector_type not in {"dingtalk", "real", "dws_cli"}:
             return None
         return await self.writeback_service.write_visit_link(context=context, final_link=final_link)
 

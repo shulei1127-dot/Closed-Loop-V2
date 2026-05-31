@@ -6,7 +6,6 @@ from typing import Any
 STATUS_LABELS = {
     "success": "成功",
     "closed_success": "已闭环",
-    "partial": "部分成功",
     "failed": "失败",
     "planned": "待执行",
     "queued": "排队中",
@@ -24,7 +23,6 @@ STATUS_LABELS = {
 STATUS_TONES = {
     "success": "success",
     "closed_success": "success",
-    "partial": "warning",
     "planned": "success",
     "queued": "warning",
     "running": "warning",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import json
 import re
@@ -8,10 +9,12 @@ from typing import Any
 import httpx
 
 from core.config import Settings, get_settings
+from services.dingtalk_visit_writeback import DingtalkVisitWritebackService
+from services.executors.proactive_real_runner import ProactiveRealRunner
 from services.executors.runner_contract import build_simulated_runner_diagnostics
 from services.executors.schemas import ExecutionResult, ExecutorContext
 from services.executors.visit_actions import VisitActionBuilder
-from services.executors.visit_real_runner import VisitRealRunner, _PtsBrowserSession, _PtsRunnerError, _read_path
+from services.executors.visit_real_runner import VisitRealRunner, _PtsRunnerError, _read_path
 from services.pts_browser_profile_session import (
     PtsBrowserProfileError,
     PtsBrowserProfileSession,
@@ -50,10 +53,20 @@ class ProactiveExecutor:
         settings: Settings | None = None,
         visit_action_builder: VisitActionBuilder | None = None,
         real_runner: VisitRealRunner | None = None,
+        proactive_real_runner: ProactiveRealRunner | None = None,
+        writeback_service: DingtalkVisitWritebackService | None = None,
+        api_token_override: str | None = None,
     ) -> None:
         self.settings = settings or get_settings()
+        self._api_token_override = api_token_override
         self.visit_action_builder = visit_action_builder or VisitActionBuilder()
-        self.real_runner = real_runner or VisitRealRunner(self.settings)
+        self.real_runner = real_runner or VisitRealRunner(self.settings, api_token_override=api_token_override)
+        self.proactive_real_runner = proactive_real_runner or ProactiveRealRunner(self.settings)
+        self.writeback_service = writeback_service or DingtalkVisitWritebackService(self.settings)
+
+    @property
+    def _effective_api_token(self) -> str:
+        return self._api_token_override or self.settings.pts_visit_api_token or self._effective_api_token
 
     def precheck(self, context: ExecutorContext) -> ExecutionResult:
         mismatch = self._validate_context(context)
@@ -83,7 +96,7 @@ class ProactiveExecutor:
             valid, diagnostics, error_message = self.real_runner.validate()
             if not valid:
                 return self._precheck_failed(
-                    error_message or "proactive PTS 真实执行配置缺失",
+                    error_message or "visit 真实执行配置缺失",
                     context,
                     actions=actions,
                     runner_diagnostics=diagnostics,
@@ -156,58 +169,58 @@ class ProactiveExecutor:
         valid, diagnostics, error_message = self.real_runner.validate()
         if not valid:
             return self._precheck_failed(
-                error_message or "proactive PTS 真实执行配置缺失",
+                error_message or "visit 真实执行配置缺失",
                 context,
                 actions=actions,
                 runner_diagnostics=diagnostics,
             )
 
-        bridge = await self._build_visit_bridge_context(context)
-        bridge_result = bridge.pop("__bridge_error_result__", None) if isinstance(bridge, dict) else None
-        if isinstance(bridge_result, ExecutionResult):
-            return bridge_result
+        # 复用 VisitRealRunner 执行 proactive 工单创建
+        # 将 proactive actions 转换为 visit 兼容格式
+                # 解析 delivery_id：优先从 product_link 解析，回退 product_info_id
+        data = context.normalized_data
+        if not data.get("delivery_id"):
+            product_link = str(data.get("product_link") or "").strip()
+            if product_link:
+                resolved = await self._resolve_delivery_id_from_product_link(product_link)
+                if resolved.delivery_id:
+                    data["delivery_id"] = resolved.delivery_id
+                    if resolved.product_id_hint:
+                        data["product_id_hint"] = resolved.product_id_hint
+                    if resolved.product_name_hint:
+                        data["product_name_hint"] = resolved.product_name_hint
+            else:
+                product_info_id = str(data.get("product_info_id") or "").strip()
+                if product_info_id:
+                    resolved = await self._resolve_delivery_context_from_product_info(product_info_id)
+                    if resolved.delivery_id:
+                        data["delivery_id"] = resolved.delivery_id
+                        if resolved.product_id_hint:
+                            data["product_id_hint"] = resolved.product_id_hint
+                        if resolved.product_name_hint:
+                            data["product_name_hint"] = resolved.product_name_hint
 
-        visit_context = ExecutorContext(
-            task_plan_id=context.task_plan_id,
-            module_code="visit",
-            task_type="visit_close",
-            plan_status=context.plan_status,
-            normalized_record_id=context.normalized_record_id,
-            source_row_id=context.source_row_id,
-            recognition_status=context.recognition_status,
-            planned_payload={**context.planned_payload, **bridge},
-            normalized_data={**context.normalized_data, **bridge},
-            source_url=context.source_url,
-            source_doc_key=context.source_doc_key,
-            source_view_key=context.source_view_key,
-            source_collector_type=context.source_collector_type,
-            source_extra_config=context.source_extra_config,
-        )
-        visit_actions, manual_reason = self.visit_action_builder.build(visit_context)
-        if manual_reason:
-            return self._manual_required(context, visit_actions, manual_reason)
-
-        outcome = await self.real_runner.run(visit_context, visit_actions)
+        visit_actions = self._convert_to_visit_actions(context, actions)
+        outcome = await self.real_runner.run(context, visit_actions)
         execution_mode = "real" if outcome.run_status == "success" else "real_attempted"
         postcheck_payload = self._extract_postcheck_payload(outcome.runner_diagnostics)
         if outcome.final_link:
             postcheck_payload["final_link"] = outcome.final_link
         extra_payload = {
             **postcheck_payload,
-            "resolved_delivery_id": bridge.get("delivery_id"),
-            "resolved_pts_link": bridge.get("pts_link"),
-            "delivery_resolution_source": bridge.get("delivery_resolution_source"),
-            "product_id_hint": bridge.get("product_id_hint"),
+            "product_link": context.normalized_data.get("product_link"),
             "bridge_runner": "visit_real_runner",
         }
         if outcome.run_status == "success":
+            writeback_result = await self._run_writeback(context, outcome.final_link or "")
+            extra_payload["writeback"] = writeback_result if writeback_result else {"enabled": False}
             return ExecutionResult(
                 run_status="success",
                 executor_version=self.executor_version,
                 final_link=outcome.final_link,
                 result_payload=self._build_payload(
                     context,
-                    actions=visit_actions,
+                    actions=actions,
                     action_results=outcome.action_results,
                     execution_mode=execution_mode,
                     runner_diagnostics=outcome.runner_diagnostics,
@@ -224,7 +237,7 @@ class ProactiveExecutor:
                 retryable=True,
                 result_payload=self._build_payload(
                     context,
-                    actions=visit_actions,
+                    actions=actions,
                     action_results=outcome.action_results,
                     execution_mode=execution_mode,
                     runner_diagnostics=outcome.runner_diagnostics,
@@ -240,7 +253,7 @@ class ProactiveExecutor:
             retryable=outcome.retryable,
             result_payload=self._build_payload(
                 context,
-                actions=visit_actions,
+                actions=actions,
                 action_results=outcome.action_results,
                 execution_mode=execution_mode,
                 runner_diagnostics=outcome.runner_diagnostics,
@@ -297,8 +310,51 @@ class ProactiveExecutor:
     def _manual_reason(self, data: dict[str, Any]) -> str | None:
         return None
 
+    async def _run_writeback(self, context: ExecutorContext, final_link: str) -> dict[str, Any] | None:
+        """Write visit link back to the Dingtalk document for proactive module."""
+        if not self.settings.proactive_writeback_enabled:
+            return None
+        if not final_link:
+            return None
+        if context.source_collector_type not in {"dingtalk", "real", "dws_cli"}:
+            return None
+        return await self.writeback_service.write_visit_link(context=context, final_link=final_link)
+
     def _should_use_real_execution(self) -> bool:
         return self.settings.enable_real_execution and self.settings.visit_real_execution_enabled
+
+    def _convert_to_visit_actions(self, context: ExecutorContext, proactive_actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """将 proactive actions 转换为 visit 兼容格式，复用 VisitRealRunner。"""
+        data = context.normalized_data
+        return [
+            {
+                "action": "open_pts_delivery_link",
+                "target": data.get("product_link"),
+            },
+            {
+                "action": "create_visit_work_order",
+                "work_order_type": "customer_satisfaction",
+                "delivery_id": (context.normalized_data.get("delivery_id") or ""),  # 优先使用已解析的 delivery_id
+            },
+            {
+                "action": "assign_owner",
+                "owner": data.get("visit_owner"),
+            },
+            {
+                "action": "mark_visit_target",
+                "customer_name": data.get("customer_name"),
+                "contact_name": data.get("contact_name"),
+            },
+            {
+                "action": "fill_feedback",
+                "satisfaction": "十分满意",  # proactive 没有满意度字段，默认为十分满意
+                "feedback_note": data.get("feedback_note"),
+            },
+            {
+                "action": "complete_visit",
+                "visit_contact": data.get("contact_phone"),
+            },
+        ]
 
     def _build_actions(self, context: ExecutorContext) -> list[dict[str, Any]]:
         return [
@@ -399,6 +455,28 @@ class ProactiveExecutor:
         data = context.normalized_data
         delivery_id = str(data.get("delivery_id") or "").strip()
         product_link = str(data.get("product_link") or "").strip()
+
+        # 真实执行模式下，如果已有 product_link，直接使用不需要解析
+        if self._should_use_real_execution():
+            if not product_link:
+                return {
+                    "__bridge_error_result__": self._precheck_failed(
+                        "缺少 product_link，无法创建 proactive 工单",
+                        context,
+                        payload={"missing_fields": ["product_link"]},
+                        runner_diagnostics=self._simulated_runner_diagnostics(reason="bridge_context_missing"),
+                    )
+                }
+            return {
+                "product_link": product_link,
+                "product_info_id": str(data.get("product_info_id") or "").strip() or None,
+                "visit_type": "客户满意度调研",
+                "visit_status": "已回访",
+                "satisfaction": str(data.get("satisfaction") or "满意").strip() or "满意",
+                "feedback_note": str(data.get("feedback_note") or "").strip(),
+                "visit_owner": str(data.get("visit_owner") or "").strip(),
+            }
+
         if not delivery_id:
             if not product_link:
                 return {
@@ -484,13 +562,9 @@ class ProactiveExecutor:
                 return resolved
 
         if not self._can_use_direct_http_transport():
-            return await self._resolve_delivery_id_from_browser_session(product_link, fallback_source="direct_http_disabled")
+            return _ResolvedDeliveryContext(delivery_id=None, source="direct_http_disabled", raw="无法通过 HTTP 访问 PTS")
 
-        headers = {
-            "Cookie": self.settings.pts_cookie_header,
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "text/html,application/xhtml+xml,application/json,*/*",
-        }
+        headers = self._pts_request_headers()
         try:
             async with httpx.AsyncClient(
                 timeout=self.settings.visit_real_timeout_seconds,
@@ -510,7 +584,7 @@ class ProactiveExecutor:
                 raw=final_url,
             )
         if response.status_code in {401, 403} or "auth.chaitin.net/login" in final_url:
-            return await self._resolve_delivery_id_from_browser_session(product_link, fallback_source="session_expired")
+            return _ResolvedDeliveryContext(delivery_id=None, source="session_expired", raw=f"status={response.status_code}")
         if response.status_code >= 400:
             return _ResolvedDeliveryContext(delivery_id=None, source="http_status", raw=f"status={response.status_code}")
 
@@ -523,64 +597,8 @@ class ProactiveExecutor:
                     source="product_page",
                     raw=match.group(0),
                 )
-        return await self._resolve_delivery_id_from_browser_session(product_link, fallback_source="not_found", raw_hint=body[:400])
+        return _ResolvedDeliveryContext(delivery_id=None, source="not_found", raw=body[:400])
 
-    async def _resolve_delivery_id_from_browser_session(
-        self,
-        product_link: str,
-        *,
-        fallback_source: str,
-        raw_hint: str | None = None,
-    ) -> _ResolvedDeliveryContext:
-        script = """
-        (() => {
-          const text = document.body ? document.body.innerText : '';
-          const html = document.documentElement ? document.documentElement.outerHTML : '';
-          return JSON.stringify({
-            url: location.href,
-            title: document.title || '',
-            text: text.slice(0, 12000),
-            html: html.slice(0, 12000)
-          });
-        })()
-        """
-        if self._can_use_browser_profile_transport():
-            try:
-                async with PtsBrowserProfileSession(self.settings) as browser:
-                    raw = await browser.execute_js_on_project_background(product_link, script)
-                return self._extract_delivery_id_from_browser_page_payload(
-                    raw,
-                    fallback_source=fallback_source,
-                    raw_hint=raw_hint,
-                    success_source="browser_profile_product_page",
-                )
-            except PtsBrowserProfileError as exc:
-                if pts_browser_profile_required(self.settings):
-                    return _ResolvedDeliveryContext(
-                        delivery_id=None,
-                        source=exc.error_type,
-                        raw=raw_hint or exc.error_message,
-                    )
-            except Exception as exc:
-                if pts_browser_profile_required(self.settings):
-                    return _ResolvedDeliveryContext(
-                        delivery_id=None,
-                        source="browser_profile_failed",
-                        raw=raw_hint or str(exc),
-                    )
-
-        try:
-            async with _PtsBrowserSession(self.settings) as browser:
-                raw = await browser.execute_js_on_project_background(product_link, script)
-        except Exception as exc:
-            return _ResolvedDeliveryContext(delivery_id=None, source=fallback_source, raw=raw_hint or str(exc))
-
-        return self._extract_delivery_id_from_browser_page_payload(
-            raw,
-            fallback_source=fallback_source,
-            raw_hint=raw_hint,
-            success_source="browser_session_product_page",
-        )
 
     @staticmethod
     def _extract_delivery_id_from_browser_page_payload(
@@ -617,6 +635,7 @@ class ProactiveExecutor:
             "query": _build_product_info_by_id_query(),
         }
         last_error: str | None = None
+        # 优先用 browser profile（如果可用）
         if self._can_use_browser_profile_transport():
             try:
                 data = await self._query_pts_graphql_payload_via_browser_profile(payload)
@@ -633,6 +652,7 @@ class ProactiveExecutor:
                 if pts_browser_profile_required(self.settings):
                     return _ResolvedDeliveryContext(delivery_id=None, source=exc.error_type, raw=exc.error_message)
 
+        # 直接 HTTP（cookie / Bearer token）
         if self._can_use_direct_http_transport():
             try:
                 data = await self._query_pts_graphql_payload(payload)
@@ -649,58 +669,51 @@ class ProactiveExecutor:
                 if exc.error_type not in {"session_expired", "http_error", "response_invalid"}:
                     return _ResolvedDeliveryContext(delivery_id=None, source=exc.error_type, raw=exc.error_message)
 
-        try:
-            data = await self._query_pts_graphql_payload_via_browser(payload)
-            resolved = self._extract_delivery_context_from_product_info_payload(
-                data,
-                product_info_id=product_info_id,
-                source="product_info_browser_graphql",
-            )
-            if resolved.delivery_id:
-                return resolved
-            return resolved
-        except _PtsRunnerError as exc:
-            return _ResolvedDeliveryContext(delivery_id=None, source=exc.error_type, raw=last_error or exc.error_message)
-        except Exception as exc:
-            return _ResolvedDeliveryContext(delivery_id=None, source="browser_graphql_failed", raw=last_error or str(exc))
+        return _ResolvedDeliveryContext(delivery_id=None, source="graphql_failed", raw=last_error or "GraphQL 查询失败")
 
     async def _query_pts_graphql_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._can_use_direct_http_transport():
             raise _PtsRunnerError(
-                error_message="缺少 PTS Cookie，无法直接查询产品信息",
+                error_message="缺少 PTS Cookie/API Token，无法直接查询产品信息",
                 error_type="session_expired",
                 retryable=False,
             )
+        headers = self._pts_request_headers()
+        base_url = self.settings.pts_base_url
+        # 当有 API token 时，优先使用内网 API 地址
+        use_api_token = bool(self._effective_api_token)
+        if use_api_token and self.settings.pts_api_base_url:
+            base_url = self.settings.pts_api_base_url
+        url = f"{base_url.rstrip('/')}/pts/query"
+        timeout_seconds = self.settings.visit_real_timeout_seconds or 30
+        verify_ssl = bool(self.settings.pts_verify_ssl)
+
+        import requests as _requests
+
         try:
-            async with httpx.AsyncClient(
-                base_url=self.settings.pts_base_url,
-                timeout=self.settings.visit_real_timeout_seconds,
-                verify=self.settings.pts_verify_ssl,
-                follow_redirects=True,
-                headers={
-                    "Cookie": self.settings.pts_cookie_header,
-                    "Content-Type": "application/json",
-                    "Accept": "*/*",
-                    "Origin": self.settings.pts_base_url,
-                    "Referer": f"{self.settings.pts_base_url.rstrip('/')}/",
-                    "User-Agent": "Mozilla/5.0",
-                },
-            ) as client:
-                response = await client.post("/query", json=payload)
-        except httpx.TimeoutException as exc:
+            response = await asyncio.to_thread(
+                _requests.post,
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout_seconds,
+                verify=verify_ssl,
+                allow_redirects=True,
+            )
+        except _requests.Timeout as exc:
             raise _PtsRunnerError(
                 error_message="PTS 产品信息查询超时",
                 error_type="timeout",
                 retryable=True,
             ) from exc
-        except httpx.HTTPError as exc:
+        except _requests.RequestException as exc:
             raise _PtsRunnerError(
                 error_message=f"PTS 产品信息查询失败: {exc}",
                 error_type="http_error",
                 retryable=True,
             ) from exc
 
-        if _is_pts_auth_response(response):
+        if _is_pts_auth_response_legacy(response):
             raise _PtsRunnerError(
                 error_message="PTS 会话已失效，请重新登录 PTS 或更新 Cookie",
                 error_type="session_expired",
@@ -738,21 +751,27 @@ class ProactiveExecutor:
                 http_status=exc.http_status,
             ) from exc
 
-    async def _query_pts_graphql_payload_via_browser(self, payload: dict[str, Any]) -> dict[str, Any]:
-        anchor_url = f"{self.settings.pts_base_url.rstrip('/')}/project"
-        async with _PtsBrowserSession(self.settings) as browser:
-            await browser.execute_js_on_project_background(anchor_url, "JSON.stringify({ready:true,url:location.href})")
-            return await browser.graphql_payload(payload)
-
     def _can_use_browser_profile_transport(self) -> bool:
         return bool(self.settings.pts_base_url) and pts_browser_profile_configured(self.settings)
 
     def _can_use_direct_http_transport(self) -> bool:
         return bool(
             self.settings.pts_base_url
-            and self.settings.pts_cookie_header
+            and (self.settings.pts_cookie_header or self._effective_api_token)
             and pts_direct_http_enabled(self.settings)
         )
+
+    def _pts_request_headers(self) -> dict[str, str]:
+        """构建 PTS HTTP 请求头，优先使用 Bearer token，其次用 Cookie。"""
+        headers = {"Content-Type": "application/json", "Accept": "*/*"}
+        if self._effective_api_token:
+            headers["Authorization"] = f"Bearer {self._effective_api_token}"
+        elif self.settings.pts_cookie_header:
+            headers["Cookie"] = self.settings.pts_cookie_header
+            headers["Origin"] = self.settings.pts_base_url
+            headers["Referer"] = f"{self.settings.pts_base_url.rstrip('/')}/"
+            headers["User-Agent"] = "Mozilla/5.0"
+        return headers
 
     @staticmethod
     def _extract_delivery_context_from_product_info_payload(
@@ -929,6 +948,17 @@ def _extract_graphql_data(payload: Any) -> dict[str, Any]:
 
 
 def _is_pts_auth_response(response: httpx.Response) -> bool:
+    final_url = str(response.url)
+    if response.status_code in {401, 403} or "auth.chaitin.net/login" in final_url:
+        return True
+    content_type = response.headers.get("content-type", "")
+    if "application/json" not in content_type.lower() and "auth.chaitin.net/login" in response.text[:1000]:
+        return True
+    return False
+
+
+def _is_pts_auth_response_legacy(response) -> bool:
+    """与 _is_pts_auth_response 相同逻辑，但适配 requests.Response 对象。"""
     final_url = str(response.url)
     if response.status_code in {401, 403} or "auth.chaitin.net/login" in final_url:
         return True
