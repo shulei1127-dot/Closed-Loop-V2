@@ -206,9 +206,9 @@ async def _dws_update_record(
 async def write_audit_to_dingtalk(
     result: AuditResult,
     *,
-    base_id: str = "o14dA3GK8g5LavPaT7dDQqoxV9ekBD76",
-    table_id: str = "Igz9TVd",
-    corp_id: str = "ding56395822e2c6d50035c2f4657eb6378f",
+    base_id: str = "",
+    table_id: str = "",
+    corp_id: str = "",
     dws_cli_path: str = "dws",
 ) -> dict[str, Any]:
     pts_url = f"https://pts.chaitin.net/project/{result.project_id}#base"
