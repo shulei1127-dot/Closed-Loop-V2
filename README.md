@@ -1,58 +1,108 @@
 # Closed-Loop-V2
 
-第一阶段代码骨架，覆盖以下链路：
+长亭科技售后闭环自动化平台（Closed Loop V2），三大业务模块：
 
-- mock 采集
-- 字段识别
-- 标准化入库
-- 任务规划
-- 结果查询 API
+- **review** — 交付转售后审核
+- **visit** — 交付转售后回访
+- **proactive** — 超半年主动回访
+
+## AI 自动执行
+
+### 1. 交付转售后自动审核
+
+从 PTS 拉取待审核项目，9 条规则自动判定，审核结论写入钉钉数据表，备注拒绝/转人工原因。
+
+| 规则 | 检查内容 |
+|------|----------|
+| R1 | 交付阶段 = 转售后审核 |
+| R2 | 售后负责人非空 |
+| R3 | 交付项和配置项非空 |
+| R4 | 配置项服务包年限识别 |
+| R5 | 企业联系人+电话格式 |
+| R6 | 产品个数 = 配置项套数（续保按实际设备数） |
+| R7 | 产品详情完整性（续保跳过硬件，保留 License；永久 License 豁免有效期） |
+| R8 | 售后有效期偏差（续保直接验证维保信息；非续保推算 ±3 月） |
+| R9 | 所有规则均可自动判定 |
+
+审核结论 → 钉钉标记：
+
+- **通过** → "通过"（关键产品：雷池、洞鉴、牧云、万象、全悉、谛听）
+- **转人工审核** → "转人工"（非关键产品 / 配置项有未识别服务包）
+- **不通过** → "拒绝"（备注写明具体原因）
+
+钉钉写入字段：审核是否通过、审核日期、PTS交付链接、客户名称、校对备注、服务内容、售后有效期、区域、交付类型、项目类型
+
+### 2. 回访工单自动创建并闭环
+
+每天 19:00（工作日），交付转售后回访 + 超半年主动回访工单自动创建并闭环，回访链接写入钉钉表格。
+
+- 7 步闭环：打开 PTS → 创建工单 → 分配负责人 → 标记回访目标 → 填写反馈 → 完成工单 → 后检确认
+- 去重保护：已闭环的钉钉行禁止重复执行；同一产品 6 月内已闭环禁止重复创建
+
+### 3. 项目打标签
+
+每月 16号、28号 10:00（工作日），"不用回访"和"售后断联"的项目在 PTS 自动打标签，回写钉钉表格。
+
+## 人工执行
+
+### 1. 电话主动回访
+
+售后负责人每天电话回访客户，将回访情况记录到钉钉数据表：
+
+- 客户建联状态填"已建联" + 反馈非空 → AI 19:00 自动创建闭环工单
+- 客户建联状态填"不用回访"或"售后断联" → AI 自动打标签
+
+### 2. 关注审核结果
+
+查看钉钉数据表中"转人工审核"和"拒绝"的项目，人工复核或补充数据后重新触发审核。
+
+### 3. 关注闭环结果
+
+后检不确定的工单需人工确认是否已闭环。
+
+## 系统保护机制
+
+| 机制 | 说明 |
+|------|------|
+| 节假日/周末自动跳过 | 非工作日不执行任何定时任务 |
+| 去重过滤 | 已成功执行过的记录不再重复规划 |
+| 6月重复闭环保护 | 同一产品 6 个月内已闭环不再重复创建 |
+| 互斥锁 | 同一模块/任务同时只能运行一个，冲突自动跳过 |
+| PTS 限流保护 | 任务间 5 秒延迟 |
+| 失败自动重试 | 同步最多 2 次，执行最多 3 次 |
+| 钉钉群通知 | 每次流水线运行后推送摘要通知 |
+
+## 流程总览
+
+```
+AI 自动执行：
+  审核：PTS → 9条规则 → 钉钉写审核结论
+  19:00 工单闭环：visit + proactive → 创建工单 → 闭环 → 回写链接
+  16/28号 打标签：不用回访/售后断联 → PTS 打标签
+
+人工执行：
+  电话回访 → 记录到钉钉 → AI读取 → 自动后续
+  关注审核结果 → 复核转人工/拒绝的项目
+  关注闭环结果 → 确认后检不确定的工单
+```
 
 ## 技术栈
 
-- FastAPI
-- PostgreSQL
-- SQLAlchemy 2.x
-- Alembic
-- APScheduler
-- Pydantic
-- Playwright fallback stub
-
-## 目录结构
-
-```text
-closed_loop_v2/
-├── apps/api
-├── core
-├── migrations
-├── models
-├── repositories
-├── scheduler
-├── schemas
-├── services
-└── tests
-```
+- Python 3.11+ / FastAPI / SQLAlchemy 2.x / PostgreSQL 16
+- Alembic / APScheduler / httpx / Playwright / pydantic-settings / Jinja2
 
 ## 快速启动
 
 1. 创建数据库 `closed_loop_v2`
 2. 复制环境变量：`cp .env.example .env`
-3. 创建虚拟环境：`python3 -m venv .venv`
-4. 安装依赖：`.venv/bin/pip install -e .[dev]`
-5. 执行迁移：`.venv/bin/alembic upgrade head`
-6. 启动服务：`.venv/bin/uvicorn apps.api.main:app --reload`
+3. 执行迁移：`alembic upgrade head`
+4. Docker 启动：`docker compose up -d`
+5. 访问：`http://localhost:8200`
 
 ## 核心接口
 
-- `GET /healthz`
-- `POST /api/sync/run`
-- `GET /api/snapshots`
-- `GET /api/records`
-- `GET /api/tasks`
-- `GET /api/modules/summary`
-
-## 第一阶段说明
-
-- 只使用 mock collectors
-- Playwright 仅保留 fallback 接口和 stub
-- executors 仅保留抽象定义，不做真实闭环执行
+- `POST /api/sync/run` — 触发同步
+- `POST /api/tasks/{id}/execute` — 执行任务
+- `POST /api/tasks/batch/execute-pending` — 批量执行
+- `GET /api/ops/overview` — 运维概览
+- `POST /api/ops/pts-session` — PTS 会话配置
